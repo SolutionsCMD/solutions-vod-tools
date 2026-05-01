@@ -16,6 +16,12 @@ const fs = require('fs');
 
 const { createServer } = require('./server/server');
 const { ensureBinaries } = require('./setup/dependencies');
+const { autoUpdater } = require('electron-updater');
+
+// We prompt the user before installing, instead of letting electron-updater
+// silently install on quit (would surprise people mid-recording).
+autoUpdater.autoDownload = true;
+autoUpdater.autoInstallOnAppQuit = false;
 
 // -------- Single-instance lock --------
 if (!app.requestSingleInstanceLock()) {
@@ -45,6 +51,7 @@ let setupWindow  = null;
 let tray         = null;
 let serverHandle = null;
 let isQuitting   = false;
+let updateDownloaded = false;
 
 // -------- Main window --------
 function createMainWindow() {
@@ -89,7 +96,21 @@ function showMainWindow() {
 // -------- Tray --------
 function buildTrayMenu() {
   const loginSettings = app.getLoginItemSettings();
-  return Menu.buildFromTemplate([
+  const items = [];
+
+  // If an update has been downloaded, surface it at the top of the menu.
+  if (updateDownloaded) {
+    items.push({
+      label: 'Restart to install update',
+      click: () => {
+        isQuitting = true;
+        autoUpdater.quitAndInstall();
+      },
+    });
+    items.push({ type: 'separator' });
+  }
+
+  items.push(
     { label: 'Open', click: showMainWindow },
     { label: 'Open in browser', click: () => shell.openExternal(APP_URL) },
     { label: 'Open VODs folder',  click: () => shell.openPath(outputDir) },
@@ -107,9 +128,12 @@ function buildTrayMenu() {
     },
     { type: 'separator' },
     { label: 'Restart server', click: restartServer },
+    { label: 'Check for updates', click: checkForUpdatesManually },
     { label: `Solutions VOD Tools v${app.getVersion()}`, enabled: false },
     { label: 'Quit', click: quitApp },
-  ]);
+  );
+
+  return Menu.buildFromTemplate(items);
 }
 
 function createTray() {
@@ -153,6 +177,61 @@ async function quitApp() {
   await stopServer();
   if (tray) { tray.destroy(); tray = null; }
   app.quit();
+}
+
+// -------- Auto-updater --------
+autoUpdater.on('error', (err) => {
+  console.error('[updater] error:', err && err.message);
+});
+
+autoUpdater.on('update-available', (info) => {
+  console.log('[updater] update available:', info && info.version);
+});
+
+autoUpdater.on('update-not-available', () => {
+  console.log('[updater] no update available');
+});
+
+autoUpdater.on('update-downloaded', (info) => {
+  console.log('[updater] update downloaded:', info && info.version);
+  updateDownloaded = true;
+  if (tray) tray.setContextMenu(buildTrayMenu());
+
+  dialog.showMessageBox({
+    type: 'info',
+    title: 'Update ready',
+    message: `Solutions VOD Tools ${info.version} is ready to install`,
+    detail: 'Restart now to apply the update? You can also choose Later and install via the tray menu when convenient.',
+    buttons: ['Restart now', 'Later'],
+    defaultId: 0,
+    cancelId: 1,
+  }).then(({ response }) => {
+    if (response === 0) {
+      isQuitting = true;
+      autoUpdater.quitAndInstall();
+    }
+  });
+});
+
+// Manual check from tray menu — gives the user explicit feedback either way.
+async function checkForUpdatesManually() {
+  try {
+    const result = await autoUpdater.checkForUpdates();
+    // If updateInfo matches current version, we're up to date.
+    const current = app.getVersion();
+    const latest  = result && result.updateInfo && result.updateInfo.version;
+    if (!latest || latest === current) {
+      dialog.showMessageBox({
+        type: 'info',
+        title: 'Up to date',
+        message: `You're on the latest version (${current}).`,
+      });
+    }
+    // If there IS an update, the update-available + update-downloaded
+    // event handlers above take it from here.
+  } catch (err) {
+    dialog.showErrorBox('Update check failed', err.message || String(err));
+  }
 }
 
 // -------- Setup window (only shown on first run while binaries download) --------
@@ -226,6 +305,15 @@ app.whenReady().then(async () => {
   }
 
   await startServer();
+
+  // Kick off an update check in the background. If we're in dev mode
+  // (running via `npm start`, not a packaged build), electron-updater logs
+  // a warning and no-ops, which is fine.
+  setTimeout(() => {
+    autoUpdater.checkForUpdatesAndNotify().catch((err) => {
+      console.error('[updater] check failed:', err && err.message);
+    });
+  }, 5000);
 
   // If we were launched at login (via openAsHidden), don't pop a window —
   // the user wants this running quietly in the background.

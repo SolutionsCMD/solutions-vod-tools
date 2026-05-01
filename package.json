@@ -15,7 +15,8 @@
     "postinstall": "electron-builder install-app-deps"
   },
   "dependencies": {
-    "express": "^4.22.1"
+    "express": "^4.22.1",
+    "electron-updater": "^6.3.9"
   },
   "devDependencies": {
     "electron": "^31.0.0",
@@ -25,6 +26,13 @@
     "appId": "com.solutions.vod-tools",
     "productName": "Solutions VOD Tools",
     "copyright": "Copyright © 2026 Solutions",
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "SolutionsCMD",
+        "repo": "solutions-vod-tools"
+      }
+    ],
     "directories": {
       "output": "dist",
       "buildResources": "build"
