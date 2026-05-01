@@ -363,6 +363,8 @@ document.getElementById('btn-start-download').addEventListener('click', () => {
     startTime: document.getElementById('start').value,
     endTime: document.getElementById('end').value,
     outputDir: document.getElementById('outputDir').value,
+    qualityPreset: qualityState.downloadPreset,
+    customFormat: qualityState.appSettings && qualityState.appSettings.customFormat,
   });
 });
 
@@ -1113,6 +1115,211 @@ window.addEventListener('page-changed', (e) => {
 });
 
 
+
+// ---------- Quality presets + settings ----------
+// State shared across the three chip surfaces (download form, live form,
+// settings page). The download chip is per-job (kept only in memory). The
+// live + settings chips read from / write to /api/settings.
+const qualityState = {
+  presets: [],            // [{id, label}]
+  appSettings: null,      // last fetched settings object
+  downloadPreset: null,   // not persisted; resets to settings.qualityDefault on load
+};
+
+const PLATFORM_LIST = [
+  { id: 'kick', label: 'Kick' },
+  { id: 'twitch', label: 'Twitch' },
+  { id: 'youtube', label: 'YouTube' },
+];
+
+function findPreset(id) {
+  return qualityState.presets.find(p => p.id === id);
+}
+
+function renderChipRow(targetEl, selectedId, onSelect) {
+  if (!targetEl) return;
+  targetEl.innerHTML = '';
+  for (const p of qualityState.presets) {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'quality-chip' + (p.id === selectedId ? ' active' : '');
+    btn.textContent = p.label;
+    btn.dataset.preset = p.id;
+    btn.addEventListener('click', () => onSelect(p.id));
+    targetEl.appendChild(btn);
+  }
+}
+
+function renderDownloadChips() {
+  renderChipRow(
+    document.getElementById('quality-chips-download'),
+    qualityState.downloadPreset,
+    (id) => { qualityState.downloadPreset = id; renderDownloadChips(); updateDownloadHint(); },
+  );
+}
+
+function updateDownloadHint() {
+  const el = document.getElementById('quality-hint-download');
+  if (!el) return;
+  const p = findPreset(qualityState.downloadPreset);
+  el.textContent = p ? `${p.label} — used for this download only.` : '';
+}
+
+function renderLiveChips() {
+  const settings = qualityState.appSettings || {};
+  renderChipRow(
+    document.getElementById('quality-chips-live'),
+    settings.qualityDefault,
+    async (id) => {
+      // Live tab chip change updates the global default. Per-platform overrides
+      // (set in Settings) still take precedence at recording time.
+      await saveSettings({ qualityDefault: id });
+      renderAllQualityUI();
+    },
+  );
+  const el = document.getElementById('quality-hint-live');
+  if (el) {
+    const p = findPreset(settings.qualityDefault);
+    el.textContent = p
+      ? `${p.label} — applies to new recordings. Existing recordings aren't affected. Per-platform overrides in Settings take precedence.`
+      : '';
+  }
+}
+
+function renderSettingsQualityChips() {
+  const settings = qualityState.appSettings || {};
+  renderChipRow(
+    document.getElementById('quality-chips-settings'),
+    settings.qualityDefault,
+    async (id) => {
+      await saveSettings({ qualityDefault: id });
+      renderAllQualityUI();
+    },
+  );
+  const el = document.getElementById('quality-hint-settings');
+  if (el) {
+    const p = findPreset(settings.qualityDefault);
+    el.textContent = p ? `Default: ${p.label}` : '';
+  }
+}
+
+function renderPerPlatformOverrides() {
+  const wrap = document.getElementById('quality-per-platform');
+  if (!wrap) return;
+  const settings = qualityState.appSettings || {};
+  const overrides = settings.qualityPerPlatform || {};
+  wrap.innerHTML = '';
+  for (const plat of PLATFORM_LIST) {
+    const row = document.createElement('div');
+    row.className = 'quality-per-platform-row';
+    const badge = document.createElement('span');
+    badge.className = `platform-badge ${plat.id}`;
+    badge.textContent = plat.label;
+    row.appendChild(badge);
+
+    const sel = document.createElement('select');
+    const noneOpt = document.createElement('option');
+    noneOpt.value = '';
+    noneOpt.textContent = '— use default —';
+    sel.appendChild(noneOpt);
+    for (const p of qualityState.presets) {
+      const opt = document.createElement('option');
+      opt.value = p.id;
+      opt.textContent = p.label;
+      sel.appendChild(opt);
+    }
+    sel.value = overrides[plat.id] || '';
+    sel.addEventListener('change', async () => {
+      const next = { ...overrides, [plat.id]: sel.value || null };
+      await saveSettings({ qualityPerPlatform: next });
+      renderAllQualityUI();
+    });
+    row.appendChild(sel);
+    wrap.appendChild(row);
+  }
+}
+
+function renderAdvancedQualityToggle() {
+  const settings = qualityState.appSettings || {};
+  const toggle = document.getElementById('setting-advanced-quality');
+  const field = document.getElementById('custom-format-field');
+  const input = document.getElementById('setting-custom-format');
+  if (!toggle || !field || !input) return;
+  toggle.checked = !!settings.advancedQualityEnabled;
+  field.style.display = settings.advancedQualityEnabled ? '' : 'none';
+  input.value = settings.customFormat || '';
+}
+
+function renderChatToggles() {
+  const settings = qualityState.appSettings || {};
+  const live = document.getElementById('setting-chat-live');
+  const vod  = document.getElementById('setting-chat-vod');
+  if (live) live.checked = !!settings.chatLiveEnabled;
+  if (vod)  vod.checked  = !!settings.chatVodReplayEnabled;
+}
+
+function renderAllQualityUI() {
+  renderDownloadChips();
+  updateDownloadHint();
+  renderLiveChips();
+  renderSettingsQualityChips();
+  renderPerPlatformOverrides();
+  renderAdvancedQualityToggle();
+  renderChatToggles();
+}
+
+async function saveSettings(patch) {
+  try {
+    const res = await fetch('/api/settings', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(patch),
+    });
+    qualityState.appSettings = await res.json();
+  } catch (err) {
+    console.error('[settings] save failed:', err);
+  }
+}
+
+async function loadQualityAndSettings() {
+  try {
+    const [presetsRes, settingsRes] = await Promise.all([
+      fetch('/api/quality/presets').then(r => r.json()),
+      fetch('/api/settings').then(r => r.json()),
+    ]);
+    qualityState.presets = presetsRes.presets || [];
+    qualityState.appSettings = settingsRes;
+    qualityState.downloadPreset = settingsRes.qualityDefault || 'source';
+    renderAllQualityUI();
+  } catch (err) {
+    console.error('[quality] failed to load presets/settings:', err);
+  }
+}
+
+// Wire settings page toggles (advanced quality + custom format + chat).
+document.addEventListener('DOMContentLoaded', () => {
+  const advToggle = document.getElementById('setting-advanced-quality');
+  if (advToggle) {
+    advToggle.addEventListener('change', async () => {
+      await saveSettings({ advancedQualityEnabled: advToggle.checked });
+      renderAdvancedQualityToggle();
+    });
+  }
+  const customInput = document.getElementById('setting-custom-format');
+  if (customInput) {
+    let timer = null;
+    customInput.addEventListener('input', () => {
+      clearTimeout(timer);
+      timer = setTimeout(() => saveSettings({ customFormat: customInput.value }), 400);
+    });
+  }
+  const chatLive = document.getElementById('setting-chat-live');
+  if (chatLive) chatLive.addEventListener('change', () => saveSettings({ chatLiveEnabled: chatLive.checked }));
+  const chatVod = document.getElementById('setting-chat-vod');
+  if (chatVod) chatVod.addEventListener('change', () => saveSettings({ chatVodReplayEnabled: chatVod.checked }));
+});
+
+loadQualityAndSettings();
 
 // Initial load
 refreshLive();

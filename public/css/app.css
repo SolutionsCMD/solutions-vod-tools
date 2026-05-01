@@ -36,6 +36,57 @@
 .platform-badge.twitch  { background: rgba(145, 70, 255, 0.18); color: #b388ff; }
 .platform-badge.youtube { background: rgba(255, 82, 82, 0.15);  color: #ff5252; }
 
+/* Quality preset chip rows */
+.quality-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.quality-chip {
+  background: var(--bg-input);
+  color: var(--text-secondary);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 6px 14px;
+  font-size: var(--fs-sm);
+  cursor: pointer;
+  transition: all 0.12s ease;
+  font-family: inherit;
+}
+.quality-chip:hover {
+  border-color: var(--accent);
+  color: var(--text-primary);
+}
+.quality-chip.active {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--bg-base);
+  font-weight: 500;
+}
+.quality-chip.active:hover { color: var(--bg-base); }
+
+/* Per-platform quality override rows in Settings */
+.quality-per-platform-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 6px 0;
+}
+.quality-per-platform-row > .platform-badge {
+  flex: 0 0 80px;
+  justify-content: center;
+}
+.quality-per-platform-row > select {
+  flex: 1;
+  background: var(--bg-input);
+  color: var(--text-primary);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  padding: 8px 12px;
+  font-size: var(--fs-sm);
+  font-family: inherit;
+}
+
 html, body {
   margin: 0; padding: 0; height: 100%;
   background: var(--bg-base);

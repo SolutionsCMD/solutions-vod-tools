@@ -49,6 +49,7 @@ const APP_URL = `http://localhost:${PORT}`;
 const userData   = app.getPath('userData');
 const binDir     = path.join(userData, 'bin');
 const stateFile  = path.join(userData, 'live-watchers.json');
+const settingsFile = path.join(userData, 'app-settings.json');
 const flagFirstRun = path.join(userData, '.first-run-done');
 const outputDir  = path.join(app.getPath('videos'), 'Solutions VOD Tools');
 const publicDir  = path.join(__dirname, 'public');
@@ -175,6 +176,7 @@ async function startServer() {
     outputDir,
     binDir,
     stateFile,
+    settingsFile,
     publicDir,
   });
   console.log('[main] server up');

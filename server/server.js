@@ -4,6 +4,8 @@ const path = require('path');
 const fs = require('fs');
 const os = require('os');
 const { PLATFORMS, getPlatform, watcherKey, parseWatcherKey } = require('./platforms');
+const quality = require('./quality');
+const { makeStore: makeSettingsStore } = require('./settings');
 
 /**
  * Boot the Express server in-process.
@@ -24,6 +26,9 @@ function createServer(options = {}) {
 
   if (!fs.existsSync(DEFAULT_OUTPUT)) fs.mkdirSync(DEFAULT_OUTPUT, { recursive: true });
   if (!fs.existsSync(BIN_DIR)) fs.mkdirSync(BIN_DIR, { recursive: true });
+
+  const SETTINGS_FILE = options.settingsFile || path.join(__dirname, 'app-settings.json');
+  const settings = makeSettingsStore(SETTINGS_FILE);
 
   const app = express();
 
@@ -65,7 +70,7 @@ function streamProcess(proc, res, label) {
 
 // -------- Download (with optional section) --------
 app.post('/api/download', async (req, res) => {
-  const { url, startTime, endTime, outputDir } = req.body;
+  const { url, startTime, endTime, outputDir, qualityPreset, customFormat } = req.body;
 
   if (!url) {
     res.status(400).json({ error: 'URL required' });
@@ -89,8 +94,14 @@ app.post('/api/download', async (req, res) => {
   const end = (endTime && endTime.trim()) || null;
   const hasSection = start || end;
 
+  const formatStr = quality.resolveFormat(
+    { preset: qualityPreset, custom: customFormat },
+    settings.get().qualityDefault,
+  );
+  writeLine(res, `[info] Format: ${formatStr}`);
+
   const ytArgs = [
-    '-f', 'bv*+ba/b',
+    '-f', formatStr,
     '--hls-prefer-native',
     '-N', '16',
     '--merge-output-format', 'mp4',
@@ -466,8 +477,12 @@ function startRecording(key) {
     }
   } catch (e) { /* ignore */ }
 
+  // Quality: per-watcher choice > per-platform default > global default.
+  const presetId = watcher.qualityPreset || settings.defaultPresetFor(watcher.platform);
+  const formatStr = quality.resolveFormat({ preset: presetId }, settings.get().qualityDefault);
+
   const args = [
-    '-f', 'bv*+ba/b',
+    '-f', formatStr,
     '--hls-prefer-native',
     '-N', '16',
     '--merge-output-format', 'mp4',
@@ -479,7 +494,7 @@ function startRecording(key) {
     platform.streamUrl(watcher.channel),
   ];
 
-  console.log(`[live] Starting recording for ${key} -> ${outputPath}`);
+  console.log(`[live] Starting recording for ${key} (quality=${presetId}) -> ${outputPath}`);
   const proc = spawn(YTDLP, args, { windowsHide: true });
   watcher.recordingProcess = proc;
   watcher.currentFile = outputPath;
@@ -730,6 +745,21 @@ app.get('/api/platforms', (req, res) => {
     pollIntervalMs: p.pollIntervalMs,
   }));
   res.json({ platforms: list });
+});
+
+// Quality preset list (used by chip rows + settings page).
+app.get('/api/quality/presets', (req, res) => {
+  res.json({ presets: quality.listPresets() });
+});
+
+// App settings (quality defaults, chat toggles, custom -f).
+app.get('/api/settings', (req, res) => {
+  res.json(settings.get());
+});
+
+app.post('/api/settings', (req, res) => {
+  const updated = settings.update(req.body || {});
+  res.json(updated);
 });
 
 app.get('/api/live', (req, res) => {

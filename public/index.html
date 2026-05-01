@@ -140,6 +140,12 @@
             <div class="hint">Leave blank to use the default. Folder will be created if it doesn't exist.</div>
           </div>
 
+          <div class="field">
+            <label class="label">Quality</label>
+            <div class="quality-chips" id="quality-chips-download" data-target="download"></div>
+            <div class="hint" id="quality-hint-download"></div>
+          </div>
+
           <div class="field-row">
             <div class="field">
               <label class="label" for="start">Start time</label>
@@ -205,6 +211,12 @@
             </button>
           </div>
           <div class="hint" id="live-input-hint" style="margin-top: 10px;">The app polls Kick every few seconds for live status. Recording starts automatically when the stream goes live.</div>
+
+          <div class="field" style="margin-top: 14px;">
+            <label class="label">Recording quality (applies to new recordings)</label>
+            <div class="quality-chips" id="quality-chips-live" data-target="live"></div>
+            <div class="hint" id="quality-hint-live"></div>
+          </div>
         </div>
 
         <div id="watchers-list"></div>
@@ -411,6 +423,53 @@
             </div>
             <div class="hint">Set during install. Update via your operating system's file manager.</div>
           </div>
+        </div>
+
+        <div class="card">
+          <div class="card-header">
+            <h2 class="card-title">Quality</h2>
+            <div class="card-subtitle">Applies to downloads and new live recordings</div>
+          </div>
+          <div class="field">
+            <label class="label">Default quality</label>
+            <div class="quality-chips" id="quality-chips-settings" data-target="settings"></div>
+            <div class="hint" id="quality-hint-settings"></div>
+          </div>
+          <div class="field" style="margin-top: 14px;">
+            <label class="label">Per-platform overrides <span style="color: var(--text-tertiary); font-weight: normal;">(optional)</span></label>
+            <div id="quality-per-platform"></div>
+            <div class="hint">Leave blank to use the default. Example: pick "YouTube upload" only for the YouTube platform.</div>
+          </div>
+          <label style="display: flex; align-items: center; gap: 10px; padding: 12px 0 0; cursor: pointer;">
+            <input type="checkbox" id="setting-advanced-quality">
+            <div>
+              <div style="color: var(--text-primary); font-weight: 500;">Advanced: custom yt-dlp format selector</div>
+              <div class="hint" style="margin: 0;">Lets you type a raw <code>-f</code> selector (e.g. <code>bv*[vcodec^=avc1][height=1080]+ba[acodec^=mp4a]</code>). Overrides the preset above when non-empty.</div>
+            </div>
+          </label>
+          <div class="field" id="custom-format-field" style="margin-top: 10px; display: none;">
+            <input type="text" id="setting-custom-format" placeholder="e.g. bv*[height<=1440]+ba/b">
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-header">
+            <h2 class="card-title">Chat capture</h2>
+          </div>
+          <label style="display: flex; align-items: center; gap: 10px; padding: 6px 0; cursor: pointer;">
+            <input type="checkbox" id="setting-chat-live">
+            <div>
+              <div style="color: var(--text-primary); font-weight: 500;">Capture chat during live recordings</div>
+              <div class="hint" style="margin: 0;">Saves <code>chat.jsonl</code> alongside each recording with millisecond-accurate timestamps.</div>
+            </div>
+          </label>
+          <label style="display: flex; align-items: center; gap: 10px; padding: 6px 0; cursor: pointer;">
+            <input type="checkbox" id="setting-chat-vod">
+            <div>
+              <div style="color: var(--text-primary); font-weight: 500;">Pull chat replay when downloading VODs</div>
+              <div class="hint" style="margin: 0;">Twitch + YouTube only. Adds noticeable time on long VODs (Twitch chat is paginated).</div>
+            </div>
+          </label>
         </div>
 
         <div class="card">
