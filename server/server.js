@@ -3,6 +3,7 @@ const { spawn, spawnSync } = require('child_process');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
+const { PLATFORMS, getPlatform, watcherKey, parseWatcherKey } = require('./platforms');
 
 /**
  * Boot the Express server in-process.
@@ -403,99 +404,43 @@ app.post('/api/kill-stray', (req, res) => {
 
 // -------- Live capture / stream monitoring --------
 const LIVE_STATE_FILE = options.stateFile || path.join(__dirname, 'live-watchers.json');
-const POLL_INTERVAL = 5000; // 5 seconds
-const KICK_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
 
-// Map<username, watcher>
+// Map<watcherKey, watcher> — key is `${platform}:${channel}` (see platforms.js).
 const liveWatchers = new Map();
+
+// Shared context handed to platform.checkLive — gives platforms access to
+// yt-dlp + spawn + fetch without each one re-importing.
+const platformCtx = {
+  ytdlpPath: YTDLP,
+  spawn,
+  fetch: (url, opts) => fetch(url, opts),
+};
 
 function saveLiveState() {
   const toSave = [];
-  for (const [username, w] of liveWatchers) {
-    toSave.push({ username, enabled: w.enabled, paused: !!w.paused });
+  for (const [, w] of liveWatchers) {
+    toSave.push({
+      platform: w.platform,
+      channel: w.channel,
+      enabled: w.enabled,
+      paused: !!w.paused,
+    });
   }
   try { fs.writeFileSync(LIVE_STATE_FILE, JSON.stringify(toSave, null, 2)); } catch (e) { /* ignore */ }
 }
 
-async function checkKickLive(username) {
-  try {
-    const res = await fetch(`https://kick.com/api/v2/channels/${encodeURIComponent(username)}`, {
-      headers: {
-        'User-Agent': KICK_UA,
-        'Accept': 'application/json, text/plain, */*',
-        'Accept-Language': 'en-US,en;q=0.9',
-        'Referer': 'https://kick.com/',
-        'Sec-Ch-Ua': '"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"',
-        'Sec-Ch-Ua-Mobile': '?0',
-        'Sec-Ch-Ua-Platform': '"Windows"',
-        'Sec-Fetch-Dest': 'empty',
-        'Sec-Fetch-Mode': 'cors',
-        'Sec-Fetch-Site': 'same-origin',
-      },
-    });
-    if (res.status === 404) return { live: false, exists: false };
-    if (res.status === 403) {
-      // Cloudflare blocked us - fall back to yt-dlp which handles this properly
-      return await checkLiveViaYtdlp(username);
-    }
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const data = await res.json();
-    return {
-      live: !!data.livestream,
-      exists: true,
-      title: data.livestream?.session_title || null,
-      startedAt: data.livestream?.created_at || null,
-      viewers: data.livestream?.viewer_count || 0,
-    };
-  } catch (err) {
-    return { live: false, error: err.message };
-  }
-}
-
-// Fallback: use yt-dlp to check live status. Slower (3-5s) but bypasses Cloudflare.
-function checkLiveViaYtdlp(username) {
-  return new Promise((resolve) => {
-    const p = spawn(YTDLP, [
-      '--dump-json',
-      '--no-download',
-      '--quiet',
-      '--no-warnings',
-      '--no-playlist',
-      `https://kick.com/${username}`,
-    ], { windowsHide: true });
-    let stdout = '';
-    let stderr = '';
-    p.stdout.on('data', d => stdout += d.toString());
-    p.stderr.on('data', d => stderr += d.toString());
-    p.on('error', () => resolve({ live: false, error: 'fallback check failed' }));
-    p.on('close', (code) => {
-      if (code === 0 && stdout.trim()) {
-        try {
-          const info = JSON.parse(stdout.trim().split('\n')[0]);
-          resolve({
-            live: info.is_live !== false,
-            exists: true,
-            title: info.title || null,
-            viewers: info.concurrent_view_count || 0,
-          });
-        } catch (e) {
-          resolve({ live: false, error: 'yt-dlp parse failed' });
-        }
-      } else {
-        // yt-dlp exits non-zero when stream is offline - this is the "not live" signal
-        resolve({ live: false, exists: true });
-      }
-    });
-  });
-}
-
-function startRecording(username) {
-  const watcher = liveWatchers.get(username);
+function startRecording(key) {
+  const watcher = liveWatchers.get(key);
   if (!watcher || watcher.recordingProcess) return;
+  const platform = getPlatform(watcher.platform);
+  if (!platform) return;
 
   ensureDir(DEFAULT_OUTPUT);
   const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
-  const sessionDir = path.join(DEFAULT_OUTPUT, `live-${username}-${timestamp}`);
+  // Channel can contain '@' for YouTube handles — strip it for the directory
+  // name so the path stays sane on Windows.
+  const safeChannel = watcher.channel.replace(/[^a-zA-Z0-9_.-]/g, '_');
+  const sessionDir = path.join(DEFAULT_OUTPUT, `live-${watcher.platform}-${safeChannel}-${timestamp}`);
   ensureDir(sessionDir);
   const outputPath = path.join(sessionDir, 'recording.mp4');
   const infoPath = path.join(sessionDir, 'info.json');
@@ -506,7 +451,8 @@ function startRecording(username) {
 
   // Write initial info.json
   const info = {
-    username,
+    platform: watcher.platform,
+    channel: watcher.channel,
     sessionDir,
     recordingStartedAt: startedIso,
     recordingEndedAt: null,
@@ -530,10 +476,10 @@ function startRecording(username) {
     '--retry-sleep', 'fragment:5',
     '--no-part',
     '-o', outputPath,
-    `https://kick.com/${username}`,
+    platform.streamUrl(watcher.channel),
   ];
 
-  console.log(`[live] Starting recording for ${username} -> ${outputPath}`);
+  console.log(`[live] Starting recording for ${key} -> ${outputPath}`);
   const proc = spawn(YTDLP, args, { windowsHide: true });
   watcher.recordingProcess = proc;
   watcher.currentFile = outputPath;
@@ -566,7 +512,7 @@ function startRecording(username) {
   proc.stderr.on('data', pushLog);
 
   proc.on('close', (code) => {
-    console.log(`[live] Recording ended for ${username} (exit ${code})`);
+    console.log(`[live] Recording ended for ${key} (exit ${code})`);
     const endedAt = Date.now();
     const endedIso = new Date(endedAt).toISOString();
     if (watcher.recordingStartedAt) {
@@ -596,7 +542,7 @@ function startRecording(username) {
     watcher.lastExitCode = code;
     if (watcher.enabled) watcher.state = 'polling';
     else {
-      liveWatchers.delete(username);
+      liveWatchers.delete(key);
       saveLiveState();
     }
   });
@@ -605,16 +551,18 @@ function startRecording(username) {
   });
 }
 
-async function pollWatcher(username) {
-  const watcher = liveWatchers.get(username);
+async function pollWatcher(key) {
+  const watcher = liveWatchers.get(key);
   if (!watcher || !watcher.enabled) return;
+  const platform = getPlatform(watcher.platform);
+  if (!platform) return;
 
   watcher.lastCheck = Date.now();
-  const status = await checkKickLive(username);
+  const status = await platform.checkLive(watcher.channel, platformCtx);
   watcher.lastStatus = status;
 
   if (status.live && !watcher.recordingProcess && !watcher.paused) {
-    startRecording(username);
+    startRecording(key);
   }
 
   // While recording, log any title changes
@@ -635,18 +583,24 @@ async function pollWatcher(username) {
   }
 }
 
-function startWatching(username) {
-  username = username.toLowerCase();
-  if (liveWatchers.has(username)) {
-    const w = liveWatchers.get(username);
+function startWatching(platformId, channel) {
+  const platform = getPlatform(platformId);
+  if (!platform) throw new Error(`Unknown platform: ${platformId}`);
+  const normalized = platform.normalize(channel);
+  if (!normalized) throw new Error(`Invalid ${platform.displayName} channel: ${channel}`);
+
+  const key = watcherKey(platformId, normalized);
+  if (liveWatchers.has(key)) {
+    const w = liveWatchers.get(key);
     w.enabled = true;
-    if (!w.interval) w.interval = setInterval(() => pollWatcher(username), POLL_INTERVAL);
+    if (!w.interval) w.interval = setInterval(() => pollWatcher(key), platform.pollIntervalMs);
     saveLiveState();
-    return;
+    return key;
   }
 
   const watcher = {
-    username,
+    platform: platformId,
+    channel: normalized,
     enabled: true,
     paused: false,
     state: 'polling',
@@ -658,16 +612,20 @@ function startWatching(username) {
     logTail: [],
     interval: null,
   };
-  liveWatchers.set(username, watcher);
+  liveWatchers.set(key, watcher);
   saveLiveState();
 
-  pollWatcher(username); // immediate first check
-  watcher.interval = setInterval(() => pollWatcher(username), POLL_INTERVAL);
+  pollWatcher(key); // immediate first check
+  watcher.interval = setInterval(() => pollWatcher(key), platform.pollIntervalMs);
+  return key;
 }
 
-function stopWatching(username, alsoKillRecording = false) {
-  username = username.toLowerCase();
-  const watcher = liveWatchers.get(username);
+function stopWatching(platformId, channel, alsoKillRecording = false) {
+  const platform = getPlatform(platformId);
+  if (!platform) return;
+  const normalized = platform.normalize(channel) || channel;
+  const key = watcherKey(platformId, normalized);
+  const watcher = liveWatchers.get(key);
   if (!watcher) return;
 
   watcher.enabled = false;
@@ -687,7 +645,7 @@ function stopWatching(username, alsoKillRecording = false) {
   }
 
   if (!watcher.recordingProcess) {
-    liveWatchers.delete(username);
+    liveWatchers.delete(key);
   }
   saveLiveState();
 }
@@ -697,10 +655,19 @@ function loadLiveState() {
     if (!fs.existsSync(LIVE_STATE_FILE)) return;
     const data = JSON.parse(fs.readFileSync(LIVE_STATE_FILE, 'utf8'));
     for (const item of data) {
-      if (item.enabled) {
-        startWatching(item.username);
-        const w = liveWatchers.get(item.username);
-        if (w && item.paused) w.paused = true;
+      if (!item.enabled) continue;
+      // Migration: legacy entries had `username` (Kick-only). Treat as kick.
+      const platformId = item.platform || 'kick';
+      const channel = item.channel || item.username;
+      if (!channel) continue;
+      try {
+        const key = startWatching(platformId, channel);
+        if (item.paused) {
+          const w = liveWatchers.get(key);
+          if (w) w.paused = true;
+        }
+      } catch (e) {
+        console.error(`[live] failed to restore watcher ${platformId}:${channel}`, e.message);
       }
     }
   } catch (e) { /* ignore */ }
@@ -735,9 +702,39 @@ function findRelatedRecordings(watcher) {
   return related.reverse(); // chronological order
 }
 
+// Helper: pull {platform, channel} out of req body, validate, return key.
+// Returns { ok: true, platform, channel, key, watcher } or { ok: false, error, status }.
+function resolveWatcherFromBody(req) {
+  const { platform: platformId, channel } = req.body || {};
+  if (!platformId || !channel) {
+    return { ok: false, status: 400, error: 'platform and channel required' };
+  }
+  const platform = getPlatform(platformId);
+  if (!platform) {
+    return { ok: false, status: 400, error: `Unknown platform: ${platformId}` };
+  }
+  const normalized = platform.normalize(channel);
+  if (!normalized) {
+    return { ok: false, status: 400, error: `Invalid ${platform.displayName} channel` };
+  }
+  const key = watcherKey(platformId, normalized);
+  return { ok: true, platform: platformId, channel: normalized, key, watcher: liveWatchers.get(key) };
+}
+
+// Expose the platform list (id, display name, poll interval) so the UI can
+// render the platform selector without hardcoding it.
+app.get('/api/platforms', (req, res) => {
+  const list = Object.values(PLATFORMS).map(p => ({
+    id: p.id,
+    displayName: p.displayName,
+    pollIntervalMs: p.pollIntervalMs,
+  }));
+  res.json({ platforms: list });
+});
+
 app.get('/api/live', (req, res) => {
   const watchers = [];
-  for (const [username, w] of liveWatchers) {
+  for (const [key, w] of liveWatchers) {
     let recordingSize = 0;
     if (w.currentFile) {
       try { recordingSize = fs.statSync(w.currentFile).size; } catch (e) { /* ignore */ }
@@ -753,8 +750,12 @@ app.get('/api/live', (req, res) => {
       latestOutput = w.currentFile;
     }
 
+    const platform = getPlatform(w.platform);
     watchers.push({
-      username,
+      key,
+      platform: w.platform,
+      platformDisplayName: platform ? platform.displayName : w.platform,
+      channel: w.channel,
       enabled: w.enabled,
       paused: !!w.paused,
       state: w.state,
@@ -767,6 +768,7 @@ app.get('/api/live', (req, res) => {
       recordingStoppedAt: w.recordingStoppedAt,
       recordingSize,
       isRecording: !!w.recordingProcess,
+      pollIntervalMs: platform ? platform.pollIntervalMs : null,
       relatedRecordings: related.map(r => ({
         file: r.file,
         startedAt: r.startedAt,
@@ -775,39 +777,40 @@ app.get('/api/live', (req, res) => {
       logTail: w.logTail.slice(-10),
     });
   }
-  res.json({ watchers, pollInterval: POLL_INTERVAL });
+  res.json({ watchers });
 });
 
 app.post('/api/live/start', (req, res) => {
-  const { username } = req.body;
-  if (!username || typeof username !== 'string' || !/^[a-zA-Z0-9_.-]{1,50}$/.test(username)) {
-    return res.status(400).json({ error: 'Invalid username' });
+  const r = resolveWatcherFromBody(req);
+  if (!r.ok) return res.status(r.status).json({ error: r.error });
+  try {
+    startWatching(r.platform, r.channel);
+    res.json({ ok: true, platform: r.platform, channel: r.channel });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
   }
-  startWatching(username.trim().toLowerCase());
-  res.json({ ok: true });
 });
 
 app.post('/api/live/stop', (req, res) => {
-  const { username, killRecording } = req.body;
-  if (!username) return res.status(400).json({ error: 'username required' });
-  stopWatching(username, !!killRecording);
+  const r = resolveWatcherFromBody(req);
+  if (!r.ok) return res.status(r.status).json({ error: r.error });
+  stopWatching(r.platform, r.channel, !!req.body.killRecording);
   res.json({ ok: true });
 });
 
 // Stop the current recording and pause auto-recording (watcher keeps polling)
 app.post('/api/live/stop-recording', (req, res) => {
-  const { username } = req.body;
-  if (!username) return res.status(400).json({ error: 'username required' });
-  const watcher = liveWatchers.get(username.toLowerCase());
-  if (!watcher) return res.status(404).json({ error: 'not watching' });
+  const r = resolveWatcherFromBody(req);
+  if (!r.ok) return res.status(r.status).json({ error: r.error });
+  if (!r.watcher) return res.status(404).json({ error: 'not watching' });
 
-  watcher.paused = true;
-  if (watcher.recordingProcess) {
+  r.watcher.paused = true;
+  if (r.watcher.recordingProcess) {
     try {
       if (process.platform === 'win32') {
-        require('child_process').spawnSync('taskkill', ['/pid', watcher.recordingProcess.pid, '/f', '/t'], { windowsHide: true });
+        require('child_process').spawnSync('taskkill', ['/pid', r.watcher.recordingProcess.pid, '/f', '/t'], { windowsHide: true });
       } else {
-        watcher.recordingProcess.kill('SIGTERM');
+        r.watcher.recordingProcess.kill('SIGTERM');
       }
     } catch (e) { /* ignore */ }
   }
@@ -817,23 +820,21 @@ app.post('/api/live/stop-recording', (req, res) => {
 
 // Unpause — will auto-record again when live detected
 app.post('/api/live/resume', (req, res) => {
-  const { username } = req.body;
-  if (!username) return res.status(400).json({ error: 'username required' });
-  const watcher = liveWatchers.get(username.toLowerCase());
-  if (!watcher) return res.status(404).json({ error: 'not watching' });
-  watcher.paused = false;
+  const r = resolveWatcherFromBody(req);
+  if (!r.ok) return res.status(r.status).json({ error: r.error });
+  if (!r.watcher) return res.status(404).json({ error: 'not watching' });
+  r.watcher.paused = false;
   saveLiveState();
   res.json({ ok: true });
 });
 
 // Stitch the last N related recordings for a watcher into one file
 app.post('/api/live/auto-stitch', async (req, res) => {
-  const { username } = req.body;
-  if (!username) { res.status(400).json({ error: 'username required' }); return; }
-  const watcher = liveWatchers.get(username.toLowerCase());
-  if (!watcher) { res.status(404).json({ error: 'not watching' }); return; }
+  const r = resolveWatcherFromBody(req);
+  if (!r.ok) { res.status(r.status).json({ error: r.error }); return; }
+  if (!r.watcher) { res.status(404).json({ error: 'not watching' }); return; }
 
-  const related = findRelatedRecordings(watcher);
+  const related = findRelatedRecordings(r.watcher);
   if (related.length < 2) { res.status(400).json({ error: 'need 2+ related recordings' }); return; }
 
   res.setHeader('Content-Type', 'text/plain; charset=utf-8');
@@ -842,34 +843,36 @@ app.post('/api/live/auto-stitch', async (req, res) => {
   const jobId = 'autostitch_' + Date.now();
   writeLine(res, `[job] ${jobId}`);
   writeLine(res, `[status] stitching`);
-  writeLine(res, `[info] Stitching ${related.length} parts for ${username}`);
-  for (const r of related) writeLine(res, `[info] Part: ${r.file}`);
+  writeLine(res, `[info] Stitching ${related.length} parts for ${r.platform}:${r.channel}`);
+  for (const rec of related) writeLine(res, `[info] Part: ${rec.file}`);
 
   const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
-  const outputDir = path.join(DEFAULT_OUTPUT, `live-${username}-stitched-${timestamp}`);
+  const safeChannel = r.channel.replace(/[^a-zA-Z0-9_.-]/g, '_');
+  const outputDir = path.join(DEFAULT_OUTPUT, `live-${r.platform}-${safeChannel}-stitched-${timestamp}`);
   ensureDir(outputDir);
   const outputPath = path.join(outputDir, 'stitched.mp4');
 
   const listPath = path.join(outputDir, 'concat-list.txt');
   const listContent = related
-    .map(r => `file '${r.file.replace(/'/g, "'\\''")}'`)
+    .map(rec => `file '${rec.file.replace(/'/g, "'\\''")}'`)
     .join('\n');
   fs.writeFileSync(listPath, listContent, 'utf8');
 
   // Merge all info.json files from source parts into a combined one
   const combinedInfo = {
-    username,
+    platform: r.platform,
+    channel: r.channel,
     sessionDir: outputDir,
     stitchedAt: new Date().toISOString(),
-    stitchedFrom: related.map(r => r.file),
+    stitchedFrom: related.map(rec => rec.file),
     recordingStartedAt: null,
     recordingEndedAt: null,
     initialTitle: null,
     titleHistory: [],
   };
-  for (const r of related) {
+  for (const rec of related) {
     try {
-      const partInfoPath = path.join(path.dirname(r.file), 'info.json');
+      const partInfoPath = path.join(path.dirname(rec.file), 'info.json');
       if (fs.existsSync(partInfoPath)) {
         const partInfo = JSON.parse(fs.readFileSync(partInfoPath, 'utf8'));
         if (!combinedInfo.recordingStartedAt) combinedInfo.recordingStartedAt = partInfo.recordingStartedAt;
@@ -908,7 +911,7 @@ app.post('/api/live/auto-stitch', async (req, res) => {
     } catch (e) { /* ignore */ }
 
     try { fs.unlinkSync(listPath); } catch (e) { /* ignore */ }
-    watcher.lastCompletedOutput = outputPath;
+    if (r.watcher) r.watcher.lastCompletedOutput = outputPath;
     writeLine(res, `\n[file] ${outputPath}`);
     writeLine(res, `[status] done`);
   } catch (err) {

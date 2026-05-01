@@ -125,13 +125,13 @@
       <section class="page active" id="page-download">
         <div class="page-header">
           <h1 class="page-title">Download &amp; cut</h1>
-          <p class="page-subtitle">Grab a Kick VOD or partial section. Trim during the download to save time on long streams.</p>
+          <p class="page-subtitle">Grab a VOD from Kick, Twitch, or YouTube — full or partial section. Trim during the download to save time on long streams.</p>
         </div>
 
         <div class="card">
           <div class="field">
-            <label class="label" for="url">Kick VOD URL</label>
-            <input type="text" id="url" placeholder="https://kick.com/channel/videos/...">
+            <label class="label" for="url">VOD URL</label>
+            <input type="text" id="url" placeholder="https://kick.com/... · https://twitch.tv/videos/... · https://youtube.com/watch?v=...">
           </div>
 
           <div class="field">
@@ -193,13 +193,18 @@
             <h2 class="card-title">Watch a channel</h2>
           </div>
           <div class="btn-row">
-            <input type="text" id="live-username" placeholder="Kick username (e.g. mizkif)" style="flex: 1;">
+            <select id="live-platform" class="platform-select" title="Platform">
+              <option value="kick">Kick</option>
+              <option value="twitch">Twitch</option>
+              <option value="youtube">YouTube</option>
+            </select>
+            <input type="text" id="live-username" placeholder="Channel name (e.g. mizkif)" style="flex: 1;">
             <button class="btn btn-primary" id="btn-add-watcher">
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
               Watch channel
             </button>
           </div>
-          <div class="hint" style="margin-top: 10px;">The app polls Kick every few seconds for live status. Recording starts automatically when the stream goes live.</div>
+          <div class="hint" id="live-input-hint" style="margin-top: 10px;">The app polls Kick every few seconds for live status. Recording starts automatically when the stream goes live.</div>
         </div>
 
         <div id="watchers-list"></div>
