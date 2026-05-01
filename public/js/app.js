@@ -365,6 +365,7 @@ document.getElementById('btn-start-download').addEventListener('click', () => {
     outputDir: document.getElementById('outputDir').value,
     qualityPreset: qualityState.downloadPreset,
     customFormat: qualityState.appSettings && qualityState.appSettings.customFormat,
+    includeChatReplay: document.getElementById('dl-include-chat').checked,
   });
 });
 
@@ -1256,6 +1257,10 @@ function renderChatToggles() {
   const vod  = document.getElementById('setting-chat-vod');
   if (live) live.checked = !!settings.chatLiveEnabled;
   if (vod)  vod.checked  = !!settings.chatVodReplayEnabled;
+  // Mirror the per-job download checkbox to the saved default so the user
+  // doesn't have to tick it every time.
+  const dlChat = document.getElementById('dl-include-chat');
+  if (dlChat) dlChat.checked = !!settings.chatVodReplayEnabled;
 }
 
 function renderAllQualityUI() {

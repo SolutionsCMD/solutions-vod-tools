@@ -358,4 +358,84 @@ function startChatCapture({ platform, channel, sessionDir, lastStatus, streamUrl
   }
 }
 
-module.exports = { startChatCapture };
+// ============================================================
+// VOD chat replay normalization (post-download)
+// ============================================================
+// After a VOD download finishes, yt-dlp may have left:
+//   - <base>.info.json with a `comments` array (Twitch, with --write-comments)
+//   - <base>.live_chat.json with action lines (YouTube, with --write-subs)
+// This function looks at both and writes a unified chat.jsonl alongside.
+//
+// `infoJsonPath` and `liveChatPath` may be null/missing — we just skip those.
+function normalizeVodChat({ platform, infoJsonPath, liveChatPath, outFile }, log = () => {}) {
+  let count = 0;
+  const out = [];
+
+  if (platform === 'twitch' && infoJsonPath && fs.existsSync(infoJsonPath)) {
+    try {
+      const info = JSON.parse(fs.readFileSync(infoJsonPath, 'utf8'));
+      const comments = Array.isArray(info.comments) ? info.comments : [];
+      for (const c of comments) {
+        const entry = normalizeTwitchVodComment(c);
+        if (entry) { out.push(JSON.stringify(entry)); count++; }
+      }
+    } catch (e) {
+      log(`[chat] vod twitch parse failed: ${e.message}`);
+    }
+  }
+
+  if (platform === 'youtube' && liveChatPath && fs.existsSync(liveChatPath)) {
+    try {
+      const text = fs.readFileSync(liveChatPath, 'utf8');
+      for (const line of text.split(/\r?\n/)) {
+        if (!line.trim()) continue;
+        let obj;
+        try { obj = JSON.parse(line); } catch (e) { continue; }
+        const entries = extractYoutubeChatEntries(obj);
+        for (const e of entries) { out.push(JSON.stringify(e)); count++; }
+      }
+    } catch (e) {
+      log(`[chat] vod youtube parse failed: ${e.message}`);
+    }
+  }
+
+  if (out.length) {
+    try { fs.writeFileSync(outFile, out.join('\n') + '\n'); }
+    catch (e) { log(`[chat] vod write failed: ${e.message}`); }
+  }
+  return count;
+}
+
+// Twitch VOD comments come in this shape (from GQL via yt-dlp):
+//   { created_at, content_offset_seconds, commenter: {display_name, name},
+//     message: { body, user_color, user_badges: [{_id,version}] } }
+function normalizeTwitchVodComment(c) {
+  if (!c || typeof c !== 'object') return null;
+  const text = c.message?.body || c.message?.fragments?.map(f => f.text).join('') || '';
+  if (!text) return null;
+  const ts = c.created_at ? new Date(c.created_at).getTime() : Date.now();
+  const entry = {
+    ts,
+    user: c.commenter?.display_name || c.commenter?.name || 'unknown',
+    text,
+  };
+  if (c.content_offset_seconds != null) entry.offsetMs = Math.round(c.content_offset_seconds * 1000);
+  if (c.message?.user_color) entry.color = c.message.user_color;
+  const badges = c.message?.user_badges;
+  if (Array.isArray(badges) && badges.length) {
+    entry.badges = badges.map(b => b._id || b.id).filter(Boolean);
+  }
+  return entry;
+}
+
+// Detect the platform from a VOD URL. Returns 'kick' | 'twitch' | 'youtube'
+// | null if it doesn't look like one of those.
+function platformFromUrl(url) {
+  if (!url || typeof url !== 'string') return null;
+  if (/(?:^|\/\/)(?:www\.)?kick\.com\//i.test(url)) return 'kick';
+  if (/(?:^|\/\/)(?:www\.)?twitch\.tv\//i.test(url)) return 'twitch';
+  if (/(?:^|\/\/)(?:www\.)?(?:youtube\.com|youtu\.be)\//i.test(url)) return 'youtube';
+  return null;
+}
+
+module.exports = { startChatCapture, normalizeVodChat, platformFromUrl };

@@ -6,7 +6,7 @@ const os = require('os');
 const { PLATFORMS, getPlatform, watcherKey, parseWatcherKey } = require('./platforms');
 const quality = require('./quality');
 const { makeStore: makeSettingsStore } = require('./settings');
-const { startChatCapture } = require('./chat');
+const { startChatCapture, normalizeVodChat, platformFromUrl } = require('./chat');
 
 /**
  * Boot the Express server in-process.
@@ -71,7 +71,7 @@ function streamProcess(proc, res, label) {
 
 // -------- Download (with optional section) --------
 app.post('/api/download', async (req, res) => {
-  const { url, startTime, endTime, outputDir, qualityPreset, customFormat } = req.body;
+  const { url, startTime, endTime, outputDir, qualityPreset, customFormat, includeChatReplay } = req.body;
 
   if (!url) {
     res.status(400).json({ error: 'URL required' });
@@ -101,6 +101,15 @@ app.post('/api/download', async (req, res) => {
   );
   writeLine(res, `[info] Format: ${formatStr}`);
 
+  // Decide whether to pull chat replay. The setting is the global default;
+  // includeChatReplay in the request is the per-job override (true/false/undef).
+  const wantChat = includeChatReplay === undefined
+    ? !!settings.get().chatVodReplayEnabled
+    : !!includeChatReplay;
+  const urlPlatform = platformFromUrl(url);
+  // Only Twitch + YouTube have documented VOD chat we can pull.
+  const captureChat = wantChat && (urlPlatform === 'twitch' || urlPlatform === 'youtube');
+
   const ytArgs = [
     '-f', formatStr,
     '--hls-prefer-native',
@@ -112,6 +121,21 @@ app.post('/api/download', async (req, res) => {
     '--download-archive', path.join(targetDir, 'archive.txt'),
     '-P', targetDir,
   ];
+
+  if (captureChat) {
+    if (urlPlatform === 'twitch') {
+      // --write-comments triggers Twitch GQL chat replay download into info.json.
+      // Slow on long VODs (paginates), but we already have --write-info-json.
+      ytArgs.push('--write-comments');
+      writeLine(res, `[info] Chat replay: enabled (Twitch comments)`);
+    } else if (urlPlatform === 'youtube') {
+      // YouTube live broadcasts that have replay keep the chat as a sub track.
+      ytArgs.push('--write-subs', '--sub-langs', 'live_chat');
+      writeLine(res, `[info] Chat replay: enabled (YouTube live_chat)`);
+    }
+  } else if (wantChat && urlPlatform === 'kick') {
+    writeLine(res, `[info] Chat replay: skipped (no VOD chat endpoint for Kick)`);
+  }
 
   if (hasSection) {
     const startStr = start || '0';
@@ -194,6 +218,28 @@ app.post('/api/download', async (req, res) => {
     writeLine(res, `\n[warn] Could not determine downloaded file path.`);
   } else {
     writeLine(res, `\n[file] ${finalFilePath}`);
+  }
+
+  // Normalize VOD chat into chat.jsonl alongside the video.
+  if (captureChat && finalFilePath) {
+    try {
+      const dir = path.dirname(finalFilePath);
+      const base = path.basename(finalFilePath, path.extname(finalFilePath));
+      // yt-dlp writes companion files using the SAME stem as the video.
+      const infoJson = path.join(dir, base + '.info.json');
+      const liveChat = path.join(dir, base + '.live_chat.json');
+      const outFile  = path.join(dir, 'chat.jsonl');
+      const count = normalizeVodChat({
+        platform: urlPlatform,
+        infoJsonPath: fs.existsSync(infoJson) ? infoJson : null,
+        liveChatPath: fs.existsSync(liveChat) ? liveChat : null,
+        outFile,
+      }, (msg) => writeLine(res, msg));
+      if (count > 0) writeLine(res, `[info] Wrote ${count} chat messages to ${outFile}`);
+      else writeLine(res, `[info] No chat messages found in download artifacts`);
+    } catch (err) {
+      writeLine(res, `[warn] Chat normalize failed: ${err.message}`);
+    }
   }
 
   writeLine(res, `\n[status] done`);
