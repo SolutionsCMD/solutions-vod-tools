@@ -1,6 +1,6 @@
 {
   "name": "solutions-vod-tools",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "description": "Desktop app for downloading, recording, trimming, and stitching Kick VODs",
   "main": "main.js",
   "author": {
@@ -15,6 +15,7 @@
     "postinstall": "electron-builder install-app-deps"
   },
   "dependencies": {
+    "electron-log": "^5.4.3",
     "electron-updater": "^6.3.9",
     "express": "^4.22.1"
   },
@@ -25,7 +26,7 @@
   "build": {
     "appId": "com.solutions.vod-tools",
     "productName": "Solutions VOD Tools",
-    "copyright": "Copyright \u00a9 2026 Solutions",
+    "copyright": "Copyright © 2026 Solutions",
     "publish": [
       {
         "provider": "github",

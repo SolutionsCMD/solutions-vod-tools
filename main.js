@@ -18,6 +18,19 @@ const { createServer } = require('./server/server');
 const { ensureBinaries } = require('./setup/dependencies');
 const { autoUpdater } = require('electron-updater');
 
+// Pipe electron-updater logs to a file at:
+//   %APPDATA%\Solutions VOD Tools\logs\main.log
+// This is invaluable for debugging "nothing happens" symptoms.
+try {
+  const log = require('electron-log');
+  log.transports.file.level = 'info';
+  log.transports.console.level = 'info';
+  autoUpdater.logger = log;
+  log.info('[boot] electron-log wired into autoUpdater');
+} catch (err) {
+  console.error('[boot] electron-log not available:', err && err.message);
+}
+
 // We prompt the user before installing, instead of letting electron-updater
 // silently install on quit (would surprise people mid-recording).
 autoUpdater.autoDownload = true;
@@ -187,16 +200,56 @@ async function quitApp() {
 }
 
 // -------- Auto-updater --------
+let manualCheckInProgress = false;
+
 autoUpdater.on('error', (err) => {
   console.error('[updater] error:', err && err.message);
+  if (manualCheckInProgress) {
+    manualCheckInProgress = false;
+    if (!isNoReleaseYetError(err)) {
+      dialog.showErrorBox('Update check failed', (err && err.message) || String(err));
+    } else {
+      dialog.showMessageBox({
+        type: 'info',
+        title: 'Up to date',
+        message: `You're on the latest version (${app.getVersion()}).`,
+      });
+    }
+  }
+});
+
+autoUpdater.on('checking-for-update', () => {
+  console.log('[updater] checking-for-update');
 });
 
 autoUpdater.on('update-available', (info) => {
   console.log('[updater] update available:', info && info.version);
+  if (manualCheckInProgress) {
+    manualCheckInProgress = false;
+    dialog.showMessageBox({
+      type: 'info',
+      title: 'Update found',
+      message: `Solutions VOD Tools ${info.version} is being downloaded`,
+      detail: 'You\'ll see another prompt when the download finishes (typically 10-30 seconds).',
+      buttons: ['OK'],
+    });
+  }
 });
 
-autoUpdater.on('update-not-available', () => {
-  console.log('[updater] no update available');
+autoUpdater.on('update-not-available', (info) => {
+  console.log('[updater] no update available, current:', app.getVersion(), 'latest:', info && info.version);
+  if (manualCheckInProgress) {
+    manualCheckInProgress = false;
+    dialog.showMessageBox({
+      type: 'info',
+      title: 'Up to date',
+      message: `You're on the latest version (${app.getVersion()}).`,
+    });
+  }
+});
+
+autoUpdater.on('download-progress', (p) => {
+  console.log(`[updater] downloading ${Math.round(p.percent)}% (${Math.round(p.bytesPerSecond/1024)} KB/s)`);
 });
 
 autoUpdater.on('update-downloaded', (info) => {
@@ -228,31 +281,40 @@ function isNoReleaseYetError(err) {
   return /Cannot find latest\.yml|HttpError: 404|status: 404|404 Not Found/i.test(msg);
 }
 
-// Manual check from tray menu — gives the user explicit feedback either way.
+// Manual check from tray menu / settings — relies on the events above for feedback,
+// since checkForUpdates() resolves before download/error events fire.
 async function checkForUpdatesManually() {
-  const current = app.getVersion();
+  if (manualCheckInProgress) {
+    console.log('[updater] manual check already in progress, ignoring');
+    return;
+  }
+  manualCheckInProgress = true;
+  console.log('[updater] manual check requested');
   try {
-    const result = await autoUpdater.checkForUpdates();
-    const latest  = result && result.updateInfo && result.updateInfo.version;
-    if (!latest || latest === current) {
-      dialog.showMessageBox({
-        type: 'info',
-        title: 'Up to date',
-        message: `You're on the latest version (${current}).`,
-      });
-    }
-    // If there IS an update, the update-available + update-downloaded
-    // event handlers above take it from here.
+    await autoUpdater.checkForUpdates();
+    // Don't show any dialog here — the update-available / update-not-available /
+    // error event handlers above will do it. We just kick the check.
+    // Safety timeout: if no event fires within 30s, surface that explicitly.
+    setTimeout(() => {
+      if (manualCheckInProgress) {
+        manualCheckInProgress = false;
+        dialog.showErrorBox(
+          'Update check timed out',
+          'No response from GitHub within 30 seconds. Check your internet connection and try again.',
+        );
+      }
+    }, 30000);
   } catch (err) {
+    manualCheckInProgress = false;
     if (isNoReleaseYetError(err)) {
       dialog.showMessageBox({
         type: 'info',
         title: 'Up to date',
-        message: `You're on the latest version (${current}).`,
+        message: `You're on the latest version (${app.getVersion()}).`,
       });
-      return;
+    } else {
+      dialog.showErrorBox('Update check failed', err.message || String(err));
     }
-    dialog.showErrorBox('Update check failed', err.message || String(err));
   }
 }
 
