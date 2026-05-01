@@ -213,12 +213,19 @@ autoUpdater.on('update-downloaded', (info) => {
   });
 });
 
+// Treat "no published release yet" as up-to-date instead of as an error.
+// Covers the chicken-and-egg moment between shipping vN.0.0 and vN.0.1, and
+// any time GitHub returns 404 on the /releases/latest endpoint.
+function isNoReleaseYetError(err) {
+  const msg = (err && err.message) || String(err || '');
+  return /Cannot find latest\.yml|HttpError: 404|status: 404|404 Not Found/i.test(msg);
+}
+
 // Manual check from tray menu — gives the user explicit feedback either way.
 async function checkForUpdatesManually() {
+  const current = app.getVersion();
   try {
     const result = await autoUpdater.checkForUpdates();
-    // If updateInfo matches current version, we're up to date.
-    const current = app.getVersion();
     const latest  = result && result.updateInfo && result.updateInfo.version;
     if (!latest || latest === current) {
       dialog.showMessageBox({
@@ -230,6 +237,14 @@ async function checkForUpdatesManually() {
     // If there IS an update, the update-available + update-downloaded
     // event handlers above take it from here.
   } catch (err) {
+    if (isNoReleaseYetError(err)) {
+      dialog.showMessageBox({
+        type: 'info',
+        title: 'Up to date',
+        message: `You're on the latest version (${current}).`,
+      });
+      return;
+    }
     dialog.showErrorBox('Update check failed', err.message || String(err));
   }
 }
@@ -311,7 +326,11 @@ app.whenReady().then(async () => {
   // a warning and no-ops, which is fine.
   setTimeout(() => {
     autoUpdater.checkForUpdatesAndNotify().catch((err) => {
-      console.error('[updater] check failed:', err && err.message);
+      // Background-check errors are deliberately silent — we only surface
+      // updater problems when the user explicitly clicks "Check for updates".
+      // The most common case is "no release published yet" (404), which is
+      // not actually a problem.
+      console.error('[updater] background check failed:', err && err.message);
     });
   }, 5000);
 
