@@ -62,13 +62,20 @@ function createMainWindow() {
   mainWindow = new BrowserWindow({
     width: 1400,
     height: 900,
-    minWidth: 800,
-    minHeight: 600,
+    minWidth: 1100,
+    minHeight: 700,
     icon: iconPath,
     title: 'Solutions VOD Tools',
-    backgroundColor: '#0a0a0a',
+    backgroundColor: '#0e0e10',
     show: false,
+    frame: false,                  // custom title bar — see public/index.html .titlebar
+    titleBarStyle: 'hidden',
     autoHideMenuBar: true,
+    webPreferences: {
+      preload: path.join(__dirname, 'preload.js'),
+      contextIsolation: true,
+      nodeIntegration: false,
+    },
   });
   mainWindow.loadURL(APP_URL);
   mainWindow.once('ready-to-show', () => mainWindow.show());
@@ -278,6 +285,48 @@ function pushSetupProgress(msg) {
     setupWindow.webContents.send('setup-progress', msg);
   }
 }
+
+// -------- IPC handlers (renderer → main) --------
+
+// Window controls
+ipcMain.on('win:minimize', () => { mainWindow?.minimize(); });
+ipcMain.on('win:toggle-maximize', () => {
+  if (!mainWindow) return;
+  if (mainWindow.isMaximized()) mainWindow.unmaximize();
+  else mainWindow.maximize();
+});
+ipcMain.on('win:close', () => { mainWindow?.close(); });
+
+// Settings
+ipcMain.handle('settings:get', () => {
+  const loginSettings = app.getLoginItemSettings();
+  return {
+    version:   app.getVersion(),
+    outputDir,
+    binDir,
+    autostart: loginSettings.openAtLogin,
+  };
+});
+ipcMain.handle('settings:set-autostart', (_e, enabled) => {
+  app.setLoginItemSettings({ openAtLogin: !!enabled, openAsHidden: true });
+  // Refresh tray menu so its "Run on startup" checkbox reflects the change
+  if (tray) tray.setContextMenu(buildTrayMenu());
+  return true;
+});
+
+// Open output folder / external links
+ipcMain.on('open:output-folder', () => { shell.openPath(outputDir); });
+ipcMain.on('open:external', (_e, url) => {
+  if (typeof url === 'string' && /^https?:\/\//.test(url)) {
+    shell.openExternal(url);
+  }
+});
+
+// Updates
+ipcMain.handle('updates:check', async () => {
+  await checkForUpdatesManually();
+  return true;
+});
 
 // -------- Lifecycle --------
 app.on('second-instance', showMainWindow);

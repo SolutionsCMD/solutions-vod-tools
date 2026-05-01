@@ -1,0 +1,99 @@
+/* ============================================================
+   Solutions VOD Tools — design tokens
+   Discord/VSCode dark base with Kick green accent.
+   ============================================================ */
+
+:root {
+  /* ---- Surfaces (darkest → lightest) ---- */
+  --bg-base:      #0e0e10;   /* app background */
+  --bg-titlebar:  #0a0a0c;   /* title bar */
+  --bg-sidebar:   #131316;   /* nav rail */
+  --bg-content:   #18181b;   /* main content surface */
+  --bg-elevated:  #1f1f24;   /* cards, panels */
+  --bg-input:     #232329;   /* form inputs, log */
+  --bg-hover:     #2a2a31;   /* row hover */
+  --bg-active:    #313139;   /* row active/selected */
+  --bg-statusbar: #0a0a0c;
+
+  /* ---- Borders ---- */
+  --border-subtle: rgba(255,255,255,0.05);
+  --border:        rgba(255,255,255,0.10);
+  --border-strong: rgba(255,255,255,0.18);
+
+  /* ---- Text ---- */
+  --text-primary:   #ededf1;
+  --text-secondary: #a1a1aa;
+  --text-tertiary:  #71717a;
+  --text-disabled:  #52525b;
+  --text-inverse:   #0a0a0c;
+
+  /* ---- Accent (Kick green) ---- */
+  --accent:         #5BFC1B;
+  --accent-hover:   #74ff3a;
+  --accent-pressed: #2DA006;
+  --accent-bg:      rgba(91,252,27,0.10);
+  --accent-bg-strong: rgba(91,252,27,0.18);
+  --accent-border:  rgba(91,252,27,0.35);
+  --accent-text:    #5BFC1B;
+
+  /* ---- State colors (semantic) ---- */
+  --success:        #22c55e;
+  --success-bg:     rgba(34,197,94,0.12);
+  --success-border: rgba(34,197,94,0.30);
+
+  --danger:         #ef4444;
+  --danger-hover:   #f87171;
+  --danger-bg:      rgba(239,68,68,0.12);
+  --danger-border:  rgba(239,68,68,0.30);
+
+  --warn:           #f59e0b;
+  --warn-bg:        rgba(245,158,11,0.12);
+  --warn-border:    rgba(245,158,11,0.30);
+
+  --info:           #3b82f6;
+  --info-bg:        rgba(59,130,246,0.12);
+  --info-border:    rgba(59,130,246,0.30);
+
+  /* ---- Radii ---- */
+  --r-sm: 4px;
+  --r-md: 6px;
+  --r-lg: 10px;
+  --r-xl: 14px;
+  --r-pill: 999px;
+
+  /* ---- Shadows ---- */
+  --shadow-sm:  0 1px 2px rgba(0,0,0,0.40);
+  --shadow-md:  0 4px 12px rgba(0,0,0,0.40);
+  --shadow-lg:  0 8px 32px rgba(0,0,0,0.55);
+  --shadow-glow: 0 0 0 3px rgba(91,252,27,0.18);
+
+  /* ---- Typography ---- */
+  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI Variable", "Segoe UI", Inter, Roboto, sans-serif;
+  --font-mono: "JetBrains Mono", "Cascadia Code", "Fira Code", "SF Mono", Consolas, monospace;
+
+  --fs-xs:   11px;
+  --fs-sm:   12px;
+  --fs-base: 13px;
+  --fs-md:   14px;
+  --fs-lg:   16px;
+  --fs-xl:   18px;
+  --fs-2xl:  22px;
+  --fs-3xl:  28px;
+
+  /* ---- Layout ---- */
+  --titlebar-h:  36px;
+  --sidebar-w:   244px;
+  --statusbar-h: 26px;
+
+  /* ---- Motion ---- */
+  --t-fast:   120ms cubic-bezier(.2,.8,.2,1);
+  --t-base:   180ms cubic-bezier(.2,.8,.2,1);
+  --t-slow:   320ms cubic-bezier(.2,.8,.2,1);
+}
+
+/* Tighter spacing on smaller windows */
+@media (max-width: 1100px) {
+  :root {
+    --sidebar-w: 64px;
+  }
+}

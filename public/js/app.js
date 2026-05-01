@@ -1,0 +1,1076 @@
+/* ============================================================
+   Solutions VOD Tools — application logic
+   Adapted from kick-vod-tools for the new shell.
+   Tab switching is driven by shell.js via window.navigateTo and
+   the 'page-changed' event.
+   ============================================================ */
+
+// Dep check on load
+function runDepCheck() {
+  fetch('/api/check').then(r => r.json()).then(data => {
+    const yt = document.getElementById('dep-ytdlp');
+    const ff = document.getElementById('dep-ffmpeg');
+
+    yt.className = 'dep-pill ' + (data.ytdlp.ok ? 'ok' : 'missing');
+    yt.title = `Source: ${data.ytdlp.source}
+Path: ${data.ytdlp.path}` +
+      (data.ytdlp.version ? `
+Version: ${data.ytdlp.version}` : '') +
+      (data.ytdlp.error ? `
+Error: ${data.ytdlp.error}` : '');
+
+    ff.className = 'dep-pill ' + (data.ffmpeg.ok ? 'ok' : 'missing');
+    ff.title = `Source: ${data.ffmpeg.source}
+Path: ${data.ffmpeg.path}` +
+      (data.ffmpeg.version ? `
+Version: ${data.ffmpeg.version}` : '') +
+      (data.ffmpeg.error ? `
+Error: ${data.ffmpeg.error}` : '');
+
+    const allOk = data.ytdlp.ok && data.ffmpeg.ok;
+    if (window.statusBar) {
+      window.statusBar.setServer(allOk ? 'ok' : 'warn', allOk ? 'ready' : 'missing dependencies');
+      if (data.defaultOutput) window.statusBar.setOutputPath(data.defaultOutput);
+    }
+
+    const diag = document.getElementById('dep-diagnostic');
+    const missing = [];
+    if (!data.ytdlp.ok) missing.push({ name: 'yt-dlp', info: data.ytdlp });
+    if (!data.ffmpeg.ok) missing.push({ name: 'ffmpeg', info: data.ffmpeg });
+
+    if (missing.length === 0) {
+      diag.classList.remove('visible');
+    } else {
+      let html = '<strong>Missing dependencies:</strong><br>';
+      for (const m of missing) {
+        html += `<br><strong>${m.name}</strong> — tried <code>${m.info.path}</code> (${m.info.source})`;
+        if (m.info.exists === false) {
+          html += '<br>&nbsp;&nbsp;• file does not exist at that path';
+        } else if (m.info.exists === true) {
+          html += '<br>&nbsp;&nbsp;• file exists but failed to run';
+          if (m.info.error) html += ` (error: <code>${m.info.error}</code>)`;
+        } else {
+          html += '<br>&nbsp;&nbsp;• not found on PATH';
+          if (m.info.error) html += ` (error: <code>${m.info.error}</code>)`;
+        }
+      }
+      html += `<br><br>Fix: restart the app to re-run first-time setup.`;
+      html += `<br>bin/ folder: <code>${data.binDir}</code> (${data.binDirExists ? 'exists' : 'missing'})`;
+      diag.innerHTML = html;
+      diag.classList.add('visible');
+    }
+
+    if (data.defaultOutput) {
+      const od = document.getElementById('outputDir');
+      const sf = document.getElementById('stitchFolder');
+      if (od) od.placeholder = 'Default: ' + data.defaultOutput;
+      if (sf) sf.placeholder = 'Default: ' + data.defaultOutput;
+    }
+  }).catch(err => {
+    if (window.statusBar) window.statusBar.setServer('error', 'unreachable');
+    console.error('[dep-check] failed:', err);
+  });
+}
+
+runDepCheck();
+document.getElementById('btn-recheck').addEventListener('click', runDepCheck);
+
+function setStatus(tab, status, text) {
+  const pill = document.getElementById('status-' + tab);
+  pill.className = 'status-pill ' + status;
+  pill.textContent = text;
+
+  const phase = document.getElementById('phase-' + tab);
+  if (phase) {
+    phase.className = 'stats-phase' + (status === 'done' ? ' done' : status === 'error' ? ' error' : '');
+    phase.textContent = text;
+  }
+}
+
+const logBuffers = {};
+const logScheduled = {};
+
+function appendLog(tab, text) {
+  const log = document.getElementById('log-' + tab);
+  log.classList.add('visible');
+  const lines = text.split(/\r\n|[\r\n]/);
+  if (!logBuffers[tab]) logBuffers[tab] = [];
+  for (const line of lines) {
+    if (line) logBuffers[tab].push(line);
+  }
+
+  if (logScheduled[tab]) return;
+  logScheduled[tab] = true;
+  requestAnimationFrame(() => {
+    logScheduled[tab] = false;
+    const buffered = logBuffers[tab];
+    logBuffers[tab] = [];
+    if (buffered.length === 0) return;
+
+    const frag = document.createDocumentFragment();
+    for (const line of buffered) {
+      const div = document.createElement('div');
+      if (line.startsWith('[status]')) div.className = 'log-line-status';
+      else if (line.startsWith('[info]')) div.className = 'log-line-info';
+      else if (line.startsWith('[file]')) div.className = 'log-line-file';
+      else if (line.startsWith('[error]')) div.className = 'log-line-error';
+      else if (line.startsWith('[warn]')) div.className = 'log-line-warn';
+      else if (line.startsWith('[cmd]')) div.className = 'log-line-cmd';
+      div.textContent = line;
+      frag.appendChild(div);
+    }
+    log.appendChild(frag);
+
+    // Trim old log lines if too many (keeps DOM fast)
+    while (log.childElementCount > 2000) {
+      log.removeChild(log.firstChild);
+    }
+
+    log.scrollTop = log.scrollHeight;
+  });
+}
+
+function clearLog(tab) {
+  const log = document.getElementById('log-' + tab);
+  log.innerHTML = '';
+  log.classList.remove('visible');
+  const result = document.getElementById('result-' + tab);
+  result.classList.remove('visible', 'error');
+  result.innerHTML = '';
+}
+
+function showResult(tab, text, isError) {
+  const box = document.getElementById('result-' + tab);
+  box.classList.add('visible');
+  if (isError) box.classList.add('error');
+  box.innerHTML = text;
+}
+
+// ---------- Stats parsing ----------
+function parseSize(sizeStr) {
+  if (!sizeStr) return null;
+  const match = sizeStr.match(/([\d.]+)\s*([KMGT]?)i?B/i);
+  if (!match) return null;
+  const num = parseFloat(match[1]);
+  const unit = (match[2] || '').toUpperCase();
+  const multipliers = { '': 1, K: 1024, M: 1048576, G: 1073741824, T: 1099511627776 };
+  return num * (multipliers[unit] || 1);
+}
+
+function formatBytesShort(bytes) {
+  if (bytes == null || isNaN(bytes)) return '—';
+  if (bytes < 1024) return bytes.toFixed(0) + ' B';
+  if (bytes < 1048576) return (bytes / 1024).toFixed(1) + ' KB';
+  if (bytes < 1073741824) return (bytes / 1048576).toFixed(1) + ' MB';
+  return (bytes / 1073741824).toFixed(2) + ' GB';
+}
+
+function cleanUnit(str) {
+  if (!str) return str;
+  return str.replace(/iB/g, 'B');
+}
+
+function parseYtdlpLine(line) {
+  if (!line.startsWith('[download]')) return null;
+  const out = {};
+  const pct = line.match(/(\d+(?:\.\d+)?)%/);
+  if (pct) out.percent = parseFloat(pct[1]);
+  const total = line.match(/of\s+~?\s*([\d.]+\s*[KMGT]?i?B)/i);
+  if (total) out.totalSize = total[1];
+  const speed = line.match(/at\s+([\d.]+\s*[KMGT]?i?B\/s|Unknown\s+B\/s)/i);
+  if (speed) out.speed = speed[1];
+  const eta = line.match(/ETA\s+([\d:]+|Unknown)/i);
+  if (eta) out.eta = eta[1];
+  const frag = line.match(/\(frag\s+(\d+)\/(\d+)\)/i);
+  if (frag) { out.fragCurrent = parseInt(frag[1]); out.fragTotal = parseInt(frag[2]); }
+  return out;
+}
+
+function parseFfmpegLine(line) {
+  // frame=  123 fps=45 q=28 size=12345kB time=00:01:30.00 bitrate=... speed=2.5x
+  if (!line.includes('time=') && !line.includes('size=')) return null;
+  const out = {};
+  const time = line.match(/time=(\d{2,}:\d{2}:\d{2}\.\d{2})/);
+  if (time) out.time = time[1];
+  const size = line.match(/size=\s*(\d+\s*[kKmM]?B)/);
+  if (size) out.size = size[1].replace('kB', 'KB').replace('mB', 'MB');
+  const speed = line.match(/speed=\s*([\d.]+x)/);
+  if (speed) out.speed = speed[1];
+  return out;
+}
+
+function updateDownloadStats(tab, progress) {
+  if (progress.percent != null) {
+    document.getElementById('percent-' + tab).textContent = progress.percent.toFixed(1) + '%';
+    document.getElementById('bar-' + tab).style.width = Math.min(progress.percent, 100) + '%';
+  }
+  if (progress.speed) {
+    document.getElementById('sp-speed-' + tab).textContent = cleanUnit(progress.speed);
+  }
+  if (progress.eta) {
+    document.getElementById('sp-eta-' + tab).textContent = progress.eta;
+  }
+  if (progress.totalSize) {
+    document.getElementById('sp-total-' + tab).textContent = cleanUnit(progress.totalSize);
+  }
+  if (progress.fragCurrent != null && progress.fragTotal != null) {
+    document.getElementById('sp-frag-' + tab).textContent =
+      progress.fragCurrent.toLocaleString() + ' / ' + progress.fragTotal.toLocaleString();
+  }
+  if (progress.percent != null && progress.totalSize) {
+    const total = parseSize(progress.totalSize);
+    if (total) {
+      document.getElementById('sp-down-' + tab).textContent = formatBytesShort(total * progress.percent / 100);
+    }
+  }
+}
+
+function updateStitchStats(tab, progress) {
+  if (progress.time) document.getElementById('sp-processed-' + tab).textContent = progress.time;
+  if (progress.speed) document.getElementById('sp-speed-' + tab).textContent = progress.speed;
+}
+
+const elapsedTimers = {};
+
+function startElapsed(tab) {
+  const start = Date.now();
+  clearInterval(elapsedTimers[tab]);
+  elapsedTimers[tab] = setInterval(() => {
+    const s = Math.floor((Date.now() - start) / 1000);
+    const h = Math.floor(s / 3600);
+    const m = Math.floor((s % 3600) / 60);
+    const sec = s % 60;
+    const pad = n => String(n).padStart(2, '0');
+    const str = h > 0 ? `${pad(h)}:${pad(m)}:${pad(sec)}` : `${pad(m)}:${pad(sec)}`;
+    const el = document.getElementById('sp-elapsed-' + tab);
+    if (el) el.textContent = str;
+  }, 1000);
+}
+
+function stopElapsed(tab) {
+  clearInterval(elapsedTimers[tab]);
+}
+
+function resetStatsCard(tab) {
+  document.getElementById('stats-' + tab).classList.add('visible');
+  const pct = document.getElementById('percent-' + tab);
+  if (pct) pct.textContent = tab === 'stitch' ? '—' : '0.0%';
+  const bar = document.getElementById('bar-' + tab);
+  if (bar) bar.style.width = '0%';
+  ['speed', 'eta', 'down', 'total', 'frag', 'processed'].forEach(k => {
+    const el = document.getElementById('sp-' + k + '-' + tab);
+    if (el) el.textContent = '—';
+  });
+  const elapsed = document.getElementById('sp-elapsed-' + tab);
+  if (elapsed) elapsed.textContent = '00:00';
+}
+
+async function streamJob(tab, url, body) {
+  clearLog(tab);
+  resetStatsCard(tab);
+  setStatus(tab, 'running', 'starting');
+  document.getElementById('btn-start-' + tab).disabled = true;
+  document.getElementById('btn-cancel-' + tab).disabled = false;
+  startElapsed(tab);
+
+  let lastStatus = 'running';
+  const finalFiles = [];
+
+  try {
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+
+    if (!res.ok && res.headers.get('content-type')?.includes('application/json')) {
+      const err = await res.json();
+      throw new Error(err.error || 'Request failed');
+    }
+
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      const chunk = decoder.decode(value, { stream: true });
+      buffer += chunk;
+      const lines = buffer.split(/\r\n|[\r\n]/);
+      buffer = lines.pop() || '';
+
+      for (const line of lines) {
+        appendLog(tab, line);
+
+        // yt-dlp progress
+        const yt = parseYtdlpLine(line);
+        if (yt) updateDownloadStats(tab, yt);
+
+        // ffmpeg progress (for cut/stitch)
+        const ff = parseFfmpegLine(line);
+        if (ff) {
+          if (tab === 'stitch') updateStitchStats(tab, ff);
+          // For download tab during cut phase, show processed time in the ETA slot
+          if (tab === 'download' && ff.time) {
+            const el = document.getElementById('sp-eta-download');
+            if (el) el.textContent = ff.time;
+          }
+        }
+
+        // Status transitions
+        if (line.startsWith('[status]')) {
+          const s = line.substring(8).trim();
+          lastStatus = s;
+          if (s === 'downloading') setStatus(tab, 'running', 'downloading');
+          else if (s === 'stitching') setStatus(tab, 'running', 'stitching');
+          else if (s === 'done') setStatus(tab, 'done', 'done');
+          else if (s === 'error') setStatus(tab, 'error', 'error');
+        }
+        if (line.startsWith('[file]')) {
+          finalFiles.push(line.substring(6).trim());
+        }
+      }
+    }
+    if (buffer) appendLog(tab, buffer);
+
+    if (lastStatus === 'done') {
+      const bar = document.getElementById('bar-' + tab);
+      if (bar) bar.style.width = '100%';
+      const fileList = finalFiles.length
+        ? finalFiles.map(f => `<div style="margin-top:4px;"><strong>→</strong> ${f}</div>`).join('')
+        : '';
+      showResult(tab, '<strong>Done.</strong>' + fileList, false);
+    } else if (lastStatus === 'error') {
+      showResult(tab, '<strong>Job failed.</strong> See log below for details.', true);
+    }
+  } catch (err) {
+    setStatus(tab, 'error', 'error');
+    appendLog(tab, '[error] ' + err.message);
+    showResult(tab, '<strong>Error:</strong> ' + err.message, true);
+  } finally {
+    stopElapsed(tab);
+    document.getElementById('btn-start-' + tab).disabled = false;
+    document.getElementById('btn-cancel-' + tab).disabled = true;
+  }
+}
+
+document.getElementById('btn-start-download').addEventListener('click', () => {
+  const url = document.getElementById('url').value.trim();
+  if (!url) { alert('Paste a Kick VOD URL first.'); return; }
+  streamJob('download', '/api/download', {
+    url,
+    startTime: document.getElementById('start').value,
+    endTime: document.getElementById('end').value,
+    outputDir: document.getElementById('outputDir').value,
+  });
+});
+
+document.getElementById('btn-cancel-download').addEventListener('click', async () => {
+  await fetch('/api/cancel', { method: 'POST' });
+});
+
+document.getElementById('btn-start-stitch').addEventListener('click', () => {
+  const files = Array.from(document.querySelectorAll('.part-input'))
+    .map(i => i.value.trim())
+    .filter(Boolean);
+  if (files.length < 2) { alert('Enter at least 2 filenames.'); return; }
+  streamJob('stitch', '/api/stitch', {
+    folder: document.getElementById('stitchFolder').value,
+    files,
+    outputName: document.getElementById('stitch-output-name').value,
+  });
+});
+
+document.getElementById('btn-cancel-stitch').addEventListener('click', async () => {
+  await fetch('/api/cancel', { method: 'POST' });
+});
+
+function addPart() {
+  const list = document.getElementById('parts-list');
+  const row = document.createElement('div');
+  row.className = 'part-row';
+  row.innerHTML = `
+    <input type="text" placeholder="next-part.mp4" class="part-input">
+    <button class="btn-remove" onclick="removePart(this)">×</button>
+  `;
+  list.appendChild(row);
+}
+
+function removePart(btn) {
+  const list = document.getElementById('parts-list');
+  if (list.children.length <= 2) return;
+  btn.parentElement.remove();
+}
+
+// ---------- Cleanup tab ----------
+let cachedVods = [];
+
+function formatBytes(bytes) {
+  if (bytes < 1024) return bytes + ' B';
+  if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+  if (bytes < 1024 * 1024 * 1024) return (bytes / 1024 / 1024).toFixed(1) + ' MB';
+  return (bytes / 1024 / 1024 / 1024).toFixed(2) + ' GB';
+}
+
+function formatRelative(iso) {
+  const then = new Date(iso).getTime();
+  const now = Date.now();
+  const diff = now - then;
+  const mins = Math.floor(diff / 60000);
+  if (mins < 1) return 'just now';
+  if (mins < 60) return mins + ' min ago';
+  const hours = Math.floor(mins / 60);
+  if (hours < 24) return hours + 'h ago';
+  const days = Math.floor(hours / 24);
+  if (days < 30) return days + 'd ago';
+  return new Date(iso).toLocaleDateString();
+}
+
+function renderVodList() {
+  const keepCount = parseInt(document.getElementById('keep-count').value) || 0;
+  const list = document.getElementById('vod-list');
+
+  if (cachedVods.length === 0) {
+    list.innerHTML = '';
+    if (window.emptyState && window.icons) {
+      list.appendChild(window.emptyState({
+        icon: window.icons.cleanup,
+        title: 'No VODs downloaded yet',
+        body: 'When you download or record VODs, they\'ll appear here so you can manage disk space.',
+      }));
+    }
+    document.getElementById('btn-cleanup').disabled = true;
+    document.getElementById('btn-cleanup').textContent = 'Delete 0 older VODs';
+    return;
+  }
+
+  const rows = cachedVods.map((v, i) => {
+    const willDelete = i >= keepCount;
+    return `
+      <div class="vod-row ${willDelete ? 'delete' : 'keep'}">
+        <div class="vod-name" title="${v.name.replace(/"/g, '&quot;')}">${v.name}</div>
+        <div class="vod-meta">${formatBytes(v.sizeBytes)} · ${formatRelative(v.mtime)}</div>
+        <div class="vod-status">${willDelete ? 'delete' : 'keep'}</div>
+      </div>
+    `;
+  }).join('');
+
+  list.innerHTML = `<div class="vod-list-wrap">${rows}</div>`;
+
+  const toDelete = Math.max(0, cachedVods.length - keepCount);
+  const freedBytes = cachedVods.slice(keepCount).reduce((sum, v) => sum + v.sizeBytes, 0);
+  const btn = document.getElementById('btn-cleanup');
+  btn.textContent = `Delete ${toDelete} older VOD${toDelete === 1 ? '' : 's'} (${formatBytes(freedBytes)})`;
+  btn.disabled = toDelete === 0;
+}
+
+async function refreshVods() {
+  const res = await fetch('/api/vods');
+  const data = await res.json();
+  cachedVods = data.vods;
+  document.getElementById('total-size').textContent = formatBytes(data.totalBytes);
+  document.getElementById('vods-folder-path').textContent = data.folder;
+  renderVodList();
+}
+
+document.getElementById('btn-refresh-vods').addEventListener('click', refreshVods);
+document.getElementById('keep-count').addEventListener('input', renderVodList);
+
+document.getElementById('btn-cleanup').addEventListener('click', async () => {
+  const keepCount = parseInt(document.getElementById('keep-count').value) || 0;
+  const toDelete = Math.max(0, cachedVods.length - keepCount);
+  const alsoResetArchive = document.getElementById('reset-archive').checked;
+
+  const confirmMsg = `Delete ${toDelete} older VOD folder${toDelete === 1 ? '' : 's'}?` +
+    (alsoResetArchive ? '\n\nALSO resetting archive.txt — deleted VODs will be re-downloadable.' : '') +
+    '\n\nThis cannot be undone.';
+  if (!confirm(confirmMsg)) return;
+
+  const result = document.getElementById('result-cleanup');
+  result.classList.remove('visible', 'error');
+  result.innerHTML = '';
+
+  try {
+    const res = await fetch('/api/cleanup', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ keepCount, alsoResetArchive }),
+    });
+    const data = await res.json();
+
+    let html = `<strong>Deleted ${data.deleted.length} folder${data.deleted.length === 1 ? '' : 's'}, freed ${formatBytes(data.freedBytes)}.</strong>`;
+    if (data.killedProcesses) {
+      html += '<br><span style="font-size:12px;">Killed stuck yt-dlp/ffmpeg processes to release file locks.</span>';
+    }
+    if (data.failed && data.failed.length) {
+      html += '<br><br>Failed to delete: ' + data.failed.map(f => f.name).join(', ');
+    }
+    result.innerHTML = html;
+    result.classList.add('visible');
+    if (data.failed && data.failed.length) result.classList.add('error');
+
+    await refreshVods();
+  } catch (err) {
+    result.innerHTML = '<strong>Error:</strong> ' + err.message;
+    result.classList.add('visible', 'error');
+  }
+});
+
+// Auto-refresh vods when switching to the cleanup tab
+window.addEventListener('page-changed', (e) => {
+  if (e.detail.page === 'cleanup') refreshVods();
+});
+
+document.getElementById('btn-kill-stuck').addEventListener('click', async () => {
+  if (!confirm('Kill any running yt-dlp.exe or ffmpeg.exe processes?\n\nThis will interrupt any active downloads. Use this only if you have stuck files that won\'t delete.')) return;
+  const result = document.getElementById('result-cleanup');
+  try {
+    const res = await fetch('/api/kill-stray', { method: 'POST' });
+    const data = await res.json();
+    let msg = 'Process cleanup complete.';
+    if (data.ytdlpKilled) msg += ' yt-dlp killed.';
+    if (data.ffmpegKilled) msg += ' ffmpeg killed.';
+    if (!data.ytdlpKilled && !data.ffmpegKilled) msg = 'No stuck processes found.';
+    result.innerHTML = msg;
+    result.classList.add('visible');
+    result.classList.remove('error');
+  } catch (err) {
+    result.innerHTML = 'Error: ' + err.message;
+    result.classList.add('visible', 'error');
+  }
+});
+
+// ---------- Live capture tab ----------
+function formatDuration(ms) {
+  const s = Math.floor(ms / 1000);
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  const sec = s % 60;
+  const pad = n => String(n).padStart(2, '0');
+  return h > 0 ? `${pad(h)}:${pad(m)}:${pad(sec)}` : `${pad(m)}:${pad(sec)}`;
+}
+
+function formatTimeAgo(ms) {
+  const diff = Date.now() - ms;
+  if (diff < 5000) return 'just now';
+  if (diff < 60000) return Math.floor(diff / 1000) + 's ago';
+  if (diff < 3600000) return Math.floor(diff / 60000) + 'm ago';
+  return Math.floor(diff / 3600000) + 'h ago';
+}
+
+async function refreshLive() {
+  try {
+    const res = await fetch('/api/live');
+    const data = await res.json();
+    renderLiveWatchers(data);
+    updateCutCard(data.watchers);
+  } catch (err) { /* ignore */ }
+
+  // Report counts to status bar + sidebar badge
+  try {
+    const list = document.getElementById('watchers-list');
+    const watcherEls = list ? list.querySelectorAll('.watcher') : [];
+    const recording = list ? list.querySelectorAll('.status-pill.live').length : 0;
+    if (window.statusBar) {
+      window.statusBar.setWatchers(watcherEls.length);
+      window.statusBar.setJobs(recording);
+    }
+    const badge = document.getElementById('badge-watchers');
+    if (badge) {
+      if (watcherEls.length > 0) { badge.style.display = ''; badge.textContent = watcherEls.length; }
+      else { badge.style.display = 'none'; }
+    }
+  } catch (e) { /* best-effort */ }
+}
+
+// Track current cut-card file so we don't overwrite inputs while user is typing
+let cutCardFile = null;
+
+function updateCutCard(watchers) {
+  // Pick the most recent watcher with a latestOutput that's NOT actively recording
+  const candidates = (watchers || []).filter(w => w.latestOutput && !w.isRecording);
+  if (candidates.length === 0) {
+    document.getElementById('cut-card').style.display = 'none';
+    cutCardFile = null;
+    cutCardWatcher = null;
+    return;
+  }
+  candidates.sort((a, b) => (b.recordingStoppedAt || b.recordingStartedAt || 0) - (a.recordingStoppedAt || a.recordingStartedAt || 0));
+  const latest = candidates[0];
+
+  document.getElementById('cut-card').style.display = 'block';
+  cutCardWatcher = latest.username;
+
+  const fileChanged = latest.latestOutput !== cutCardFile;
+  if (fileChanged) {
+    cutCardFile = latest.latestOutput;
+    document.getElementById('cut-file-path').textContent = latest.latestOutput;
+    onFileChange(latest.latestOutput);
+  }
+
+  // Duration + size
+  let durationText = '';
+  if (latest.recordingStartedAt && latest.recordingStoppedAt) {
+    durationText = 'Recorded duration: ~' + formatDuration(latest.recordingStoppedAt - latest.recordingStartedAt);
+  }
+  let size = 0;
+  try { /* no-op */ } catch (e) {}
+  // Get file size - not in response for stitched files, so we estimate from recordingSize for recordings
+  const sizeText = latest.recordingSize ? 'Size: ' + formatBytes(latest.recordingSize) : '';
+  document.getElementById('cut-file-meta').textContent = [durationText, sizeText].filter(Boolean).join(' • ');
+
+  // Auto-stitch button
+  const stitchBtn = document.getElementById('btn-auto-stitch');
+  const related = latest.relatedRecordings || [];
+  // Only show if the latestOutput is one of the individual recordings (not already stitched)
+  // and there are 2+ related parts
+  const isStitched = latest.latestOutput && latest.latestOutput.includes('-stitched-');
+  if (related.length >= 2 && !isStitched) {
+    stitchBtn.style.display = 'inline-block';
+    stitchBtn.textContent = `Auto-stitch ${related.length} parts first`;
+    stitchBtn.dataset.username = latest.username;
+    stitchBtn.dataset.count = related.length;
+  } else {
+    stitchBtn.style.display = 'none';
+  }
+}
+
+let cutCardWatcher = null;
+let fileDuration = 0;
+
+// ---- Time helpers ----
+function secondsToTimestamp(secs) {
+  const total = Math.max(0, Math.floor(secs));
+  const h = Math.floor(total / 3600);
+  const m = Math.floor((total % 3600) / 60);
+  const s = total % 60;
+  const pad = n => String(n).padStart(2, '0');
+  return `${pad(h)}:${pad(m)}:${pad(s)}`;
+}
+
+function timestampToSeconds(str) {
+  if (!str) return 0;
+  const parts = str.trim().split(':').map(p => parseFloat(p) || 0);
+  if (parts.length === 3) return parts[0] * 3600 + parts[1] * 60 + parts[2];
+  if (parts.length === 2) return parts[0] * 60 + parts[1];
+  return parts[0] || 0;
+}
+
+function clampSeconds(secs) {
+  return Math.max(0, Math.min(fileDuration || 0, Math.round(secs)));
+}
+
+// ---- When the trim card's target file changes, set up sliders ----
+async function onFileChange(filePath) {
+  fileDuration = 0;
+  const startSlider = document.getElementById('cut-start-slider');
+  const endSlider = document.getElementById('cut-end-slider');
+  const startInput = document.getElementById('cut-start');
+  const endInput = document.getElementById('cut-end');
+  const startLabel = document.getElementById('cut-start-label');
+  const endLabel = document.getElementById('cut-end-label');
+
+  // Reset visuals while fetching
+  startSlider.max = 0; startSlider.value = 0;
+  endSlider.max = 0; endSlider.value = 0;
+  startInput.value = '00:00:00';
+  endInput.value = '';
+  startLabel.textContent = '00:00:00';
+  endLabel.textContent = '--:--:--';
+
+  try {
+    const res = await fetch(`/api/file-duration?path=${encodeURIComponent(filePath)}`);
+    const data = await res.json();
+    if (data && data.duration && data.duration > 0) {
+      fileDuration = Math.ceil(data.duration);
+    }
+  } catch (e) {
+    fileDuration = 0;
+  }
+
+  if (fileDuration > 0) {
+    startSlider.max = fileDuration;
+    endSlider.max = fileDuration;
+    startSlider.value = 0;
+    endSlider.value = fileDuration;
+    startInput.value = '00:00:00';
+    endInput.value = secondsToTimestamp(fileDuration);
+    startLabel.textContent = '00:00:00';
+    endLabel.textContent = secondsToTimestamp(fileDuration);
+  }
+
+  updatePreview('start');
+  updatePreview('end');
+}
+
+// ---- Debounced preview ----
+const previewTimers = {};
+function updatePreview(which) {
+  if (!cutCardFile) return;
+  const img = document.getElementById('cut-preview-' + which);
+  const timeEl = document.getElementById('cut-' + which);
+  let time = (timeEl.value || '').trim();
+  if (which === 'start' && !time) time = '0';
+  if (which === 'end' && !time) time = 'end';
+
+  img.classList.add('loading');
+  img.classList.remove('empty');
+  const url = `/api/frame?path=${encodeURIComponent(cutCardFile)}&time=${encodeURIComponent(time)}`;
+  img.onload = () => img.classList.remove('loading');
+  img.onerror = () => { img.classList.remove('loading'); img.classList.add('empty'); };
+  img.src = url;
+}
+
+function schedulePreview(which, delay = 300) {
+  clearTimeout(previewTimers[which]);
+  previewTimers[which] = setTimeout(() => updatePreview(which), delay);
+}
+
+// ---- Sync between slider, text input, and time label ----
+function setTime(which, seconds, source) {
+  const secs = clampSeconds(seconds);
+  const slider = document.getElementById('cut-' + which + '-slider');
+  const input = document.getElementById('cut-' + which);
+  const label = document.getElementById('cut-' + which + '-label');
+  const ts = secondsToTimestamp(secs);
+
+  if (source !== 'slider') slider.value = secs;
+  if (source !== 'input') input.value = ts;
+  label.textContent = ts;
+}
+
+// Slider drag: update label + input immediately, debounce frame fetch
+document.getElementById('cut-start-slider').addEventListener('input', (e) => {
+  setTime('start', parseInt(e.target.value, 10), 'slider');
+  schedulePreview('start', 250);
+});
+document.getElementById('cut-end-slider').addEventListener('input', (e) => {
+  setTime('end', parseInt(e.target.value, 10), 'slider');
+  schedulePreview('end', 250);
+});
+
+// Text input: parse to seconds, update slider, debounce frame fetch
+document.getElementById('cut-start').addEventListener('input', (e) => {
+  if (fileDuration > 0) {
+    setTime('start', timestampToSeconds(e.target.value), 'input');
+  }
+  schedulePreview('start', 500);
+});
+document.getElementById('cut-end').addEventListener('input', (e) => {
+  if (fileDuration > 0) {
+    setTime('end', timestampToSeconds(e.target.value), 'input');
+  }
+  schedulePreview('end', 500);
+});
+
+// Step buttons (-5m / -1m / -10s / -1s / +1s / +10s / +1m / +5m)
+document.addEventListener('click', (e) => {
+  const btn = e.target.closest('.step-btn');
+  if (!btn) return;
+  const which = btn.dataset.adjust;
+  const delta = parseInt(btn.dataset.delta, 10);
+  if (!which || isNaN(delta)) return;
+  const slider = document.getElementById('cut-' + which + '-slider');
+  const current = parseInt(slider.value, 10) || 0;
+  setTime(which, current + delta, 'button');
+  updatePreview(which); // immediate for button clicks
+});
+
+document.getElementById('btn-auto-stitch').addEventListener('click', async () => {
+  const btn = document.getElementById('btn-auto-stitch');
+  const username = btn.dataset.username;
+  const count = btn.dataset.count;
+  if (!username) return;
+  if (!confirm(`Stitch the last ${count} recording parts for ${username} into one file?\n\nThe originals will be kept. The combined file will appear in the trim card above.`)) return;
+
+  const pill = document.getElementById('status-cut');
+  const result = document.getElementById('result-cut');
+  btn.disabled = true;
+  pill.className = 'status-pill running';
+  pill.textContent = 'stitching';
+  result.innerHTML = '';
+  result.classList.remove('visible', 'error');
+
+  let finalFile = null;
+  let errorMsg = null;
+  let lastStatus = 'running';
+
+  try {
+    const res = await fetch('/api/live/auto-stitch', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username }),
+    });
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split(/\r\n|[\r\n]/);
+      buffer = lines.pop() || '';
+      for (const line of lines) {
+        if (line.startsWith('[file]')) finalFile = line.substring(6).trim();
+        if (line.startsWith('[error]')) errorMsg = line.substring(7).trim();
+        if (line.startsWith('[status]')) lastStatus = line.substring(8).trim();
+      }
+    }
+
+    if (lastStatus === 'done' && finalFile) {
+      pill.className = 'status-pill done';
+      pill.textContent = 'stitched';
+      result.innerHTML = `<strong>Stitched ${count} parts.</strong><div style="margin-top:4px;"><strong>→</strong> ${escapeHtmlStr(finalFile)}</div>`;
+      result.classList.add('visible');
+      // Force refresh so the trim card picks up the new latestOutput
+      setTimeout(refreshLive, 500);
+    } else {
+      pill.className = 'status-pill error';
+      pill.textContent = 'error';
+      result.innerHTML = '<strong>Stitch failed.</strong>' + (errorMsg ? '<br>' + escapeHtmlStr(errorMsg) : '');
+      result.classList.add('visible', 'error');
+    }
+  } catch (err) {
+    pill.className = 'status-pill error';
+    pill.textContent = 'error';
+    result.innerHTML = '<strong>Error:</strong> ' + escapeHtmlStr(err.message);
+    result.classList.add('visible', 'error');
+  } finally {
+    btn.disabled = false;
+  }
+});
+
+document.getElementById('btn-cut-file').addEventListener('click', async () => {
+  if (!cutCardFile) return;
+  const btn = document.getElementById('btn-cut-file');
+  const pill = document.getElementById('status-cut');
+  const result = document.getElementById('result-cut');
+  const keepOriginal = document.getElementById('cut-keep-original').checked;
+
+  btn.disabled = true;
+  pill.className = 'status-pill running';
+  pill.textContent = 'cutting';
+  result.innerHTML = '';
+  result.classList.remove('visible', 'error');
+
+  let finalFile = null;
+  let errorMsg = null;
+  let lastStatus = 'running';
+
+  try {
+    const res = await fetch('/api/cut-file', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        path: cutCardFile,
+        startTime: document.getElementById('cut-start').value,
+        endTime: document.getElementById('cut-end').value,
+        keepOriginal,
+      }),
+    });
+
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split(/\r\n|[\r\n]/);
+      buffer = lines.pop() || '';
+      for (const line of lines) {
+        if (line.startsWith('[file]')) finalFile = line.substring(6).trim();
+        if (line.startsWith('[error]')) errorMsg = line.substring(7).trim();
+        if (line.startsWith('[status]')) lastStatus = line.substring(8).trim();
+      }
+    }
+
+    if (lastStatus === 'done' && finalFile) {
+      pill.className = 'status-pill done';
+      pill.textContent = 'done';
+      result.innerHTML = `<strong>Done.</strong><div style="margin-top:4px;"><strong>→</strong> ${escapeHtmlStr(finalFile)}</div>`;
+      result.classList.add('visible');
+      // Reset inputs after successful cut
+      document.getElementById('cut-start').value = '';
+      document.getElementById('cut-end').value = '';
+      // Refresh to update file path (old one may have been deleted)
+      setTimeout(refreshLive, 500);
+    } else {
+      pill.className = 'status-pill error';
+      pill.textContent = 'error';
+      result.innerHTML = '<strong>Cut failed.</strong>' + (errorMsg ? '<br>' + escapeHtmlStr(errorMsg) : '');
+      result.classList.add('visible', 'error');
+    }
+  } catch (err) {
+    pill.className = 'status-pill error';
+    pill.textContent = 'error';
+    result.innerHTML = '<strong>Error:</strong> ' + escapeHtmlStr(err.message);
+    result.classList.add('visible', 'error');
+  } finally {
+    btn.disabled = false;
+  }
+});
+
+function renderLiveWatchers(data) {
+  const list = document.getElementById('watchers-list');
+  if (!data.watchers || data.watchers.length === 0) {
+    list.innerHTML = '';
+    if (window.emptyState && window.icons) {
+      list.appendChild(window.emptyState({
+        icon: window.icons.live,
+        title: 'No channels being watched',
+        body: 'Add a Kick username above to start auto-recording streams the moment they go live.',
+      }));
+    }
+    return;
+  }
+
+  let html = '';
+  for (const w of data.watchers) {
+    const isRec = w.isRecording;
+    const isPaused = w.paused && !isRec;
+    const cardClass = isRec ? 'watcher-card recording' : 'watcher-card';
+
+    let pillClass, pillText;
+    if (isRec) { pillClass = 'watcher-state-pill recording'; pillText = 'Recording'; }
+    else if (isPaused) { pillClass = 'watcher-state-pill paused'; pillText = 'Paused'; }
+    else { pillClass = 'watcher-state-pill polling'; pillText = 'Watching'; }
+
+    let stats = '';
+    stats += `<div><div class="watcher-stat-label">Last check</div><div class="watcher-stat-value">${w.lastCheck ? formatTimeAgo(w.lastCheck) : '—'}</div></div>`;
+
+    if (isRec && w.recordingStartedAt) {
+      stats += `<div><div class="watcher-stat-label">Recording for</div><div class="watcher-stat-value">${formatDuration(Date.now() - w.recordingStartedAt)}</div></div>`;
+      stats += `<div><div class="watcher-stat-label">File size</div><div class="watcher-stat-value">${formatBytes(w.recordingSize || 0)}</div></div>`;
+    } else if (isPaused) {
+      const liveNow = w.lastStatus?.live;
+      stats += `<div><div class="watcher-stat-label">Auto-record</div><div class="watcher-stat-value" style="color: var(--warn);">Paused${liveNow ? ' (stream is live)' : ''}</div></div>`;
+    } else {
+      const ls = w.lastStatus || {};
+      if (ls.live === false && ls.error) {
+        stats += `<div><div class="watcher-stat-label">Status</div><div class="watcher-stat-value" style="color: var(--danger);">Error: ${ls.error}</div></div>`;
+      } else if (ls.live === false && ls.exists === false) {
+        stats += `<div><div class="watcher-stat-label">Status</div><div class="watcher-stat-value" style="color: var(--danger);">Channel not found</div></div>`;
+      } else {
+        stats += `<div><div class="watcher-stat-label">Status</div><div class="watcher-stat-value">Offline (poll every ${Math.round(data.pollInterval / 1000)}s)</div></div>`;
+      }
+      if (ls.viewers != null && ls.live) {
+        stats += `<div><div class="watcher-stat-label">Viewers</div><div class="watcher-stat-value">${ls.viewers.toLocaleString()}</div></div>`;
+      }
+    }
+
+    if (isRec && w.lastStatus?.title) {
+      stats += `<div style="grid-column: 1 / -1;"><div class="watcher-stat-label">Current stream title</div><div class="watcher-stat-value">${escapeHtmlStr(w.lastStatus.title)}</div></div>`;
+    } else if (!isRec && w.lastStatus?.live && w.lastStatus?.title) {
+      stats += `<div style="grid-column: 1 / -1;"><div class="watcher-stat-label">Stream title</div><div class="watcher-stat-value">${escapeHtmlStr(w.lastStatus.title)}</div></div>`;
+    }
+
+    let buttons = '';
+    if (isRec) {
+      buttons += `<button class="watcher-btn danger" onclick="stopRecording('${w.username}')">Stop recording</button>`;
+    } else if (isPaused) {
+      buttons += `<button class="watcher-btn" onclick="resumeWatcher('${w.username}')">Resume auto-record</button>`;
+    }
+    buttons += `<button class="watcher-btn" onclick="unwatchChannel('${w.username}')">Unwatch</button>`;
+
+    html += `
+      <div class="${cardClass}">
+        <div class="watcher-header">
+          <div class="watcher-name">${escapeHtmlStr(w.username)}</div>
+          <div class="${pillClass}">${pillText}</div>
+        </div>
+        <div class="watcher-body">${stats}</div>
+        ${w.currentFile && isRec ? `<div class="watcher-file">${escapeHtmlStr(w.currentFile)}</div>` : ''}
+        <div class="watcher-actions">${buttons}</div>
+      </div>
+    `;
+  }
+  list.innerHTML = html;
+}
+
+function escapeHtmlStr(str) {
+  if (str == null) return '';
+  return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+async function stopRecording(username) {
+  if (!confirm(`Stop the current recording of ${username}?\n\nThe file so far will be kept. Auto-recording will be paused until you hit Resume.`)) return;
+  await fetch('/api/live/stop-recording', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ username }),
+  });
+  refreshLive();
+}
+
+async function resumeWatcher(username) {
+  await fetch('/api/live/resume', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ username }),
+  });
+  refreshLive();
+}
+
+async function unwatchChannel(username) {
+  if (!confirm(`Stop watching ${username}?\n\nAny ongoing recording will be stopped and the file kept.`)) return;
+  await fetch('/api/live/stop', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ username, killRecording: true }),
+  });
+  refreshLive();
+}
+
+document.getElementById('btn-add-watcher').addEventListener('click', async () => {
+  const input = document.getElementById('live-username');
+  const username = input.value.trim().toLowerCase();
+  if (!username) { alert('Enter a Kick username first.'); return; }
+  if (!/^[a-zA-Z0-9_.-]+$/.test(username)) { alert('Invalid username format.'); return; }
+
+  try {
+    const res = await fetch('/api/live/start', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username }),
+    });
+    if (!res.ok) {
+      const err = await res.json();
+      alert('Error: ' + (err.error || 'unknown'));
+      return;
+    }
+    input.value = '';
+    refreshLive();
+  } catch (err) {
+    alert('Error: ' + err.message);
+  }
+});
+
+document.getElementById('live-username').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') document.getElementById('btn-add-watcher').click();
+});
+
+// Refresh every 2 seconds while on the Live tab, every 10 seconds otherwise
+let liveRefreshInterval = null;
+function setLiveRefreshRate(fast) {
+  if (liveRefreshInterval) clearInterval(liveRefreshInterval);
+  liveRefreshInterval = setInterval(refreshLive, fast ? 2000 : 10000);
+}
+
+window.addEventListener('page-changed', (e) => {
+  if (e.detail.page === 'live') {
+    refreshLive();
+    setLiveRefreshRate(true);
+  } else if (['download', 'stitch', 'cleanup', 'settings'].includes(e.detail.page)) {
+    setLiveRefreshRate(false);
+  }
+});
+
+
+
+// Initial load
+refreshLive();
+setLiveRefreshRate(false);
+
+
