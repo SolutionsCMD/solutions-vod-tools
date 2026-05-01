@@ -1,0 +1,68 @@
+{
+  "name": "solutions-vod-tools",
+  "version": "1.0.0",
+  "description": "Desktop app for downloading, recording, trimming, and stitching Kick VODs",
+  "main": "main.js",
+  "author": {
+    "name": "Solutions"
+  },
+  "license": "MIT",
+  "private": true,
+  "scripts": {
+    "start": "electron .",
+    "build": "electron-builder --win",
+    "build:dir": "electron-builder --win --dir",
+    "postinstall": "electron-builder install-app-deps"
+  },
+  "dependencies": {
+    "express": "^4.22.1"
+  },
+  "devDependencies": {
+    "electron": "^31.0.0",
+    "electron-builder": "^24.13.3"
+  },
+  "build": {
+    "appId": "com.solutions.vod-tools",
+    "productName": "Solutions VOD Tools",
+    "copyright": "Copyright © 2026 Solutions",
+    "directories": {
+      "output": "dist",
+      "buildResources": "build"
+    },
+    "files": [
+      "main.js",
+      "server/**/*",
+      "public/**/*",
+      "setup/**/*",
+      "build/icon.ico",
+      "package.json",
+      "!**/*.{md,markdown}",
+      "!**/node_modules/*/{CHANGELOG.md,README.md,readme.md}",
+      "!**/node_modules/*/{test,tests,__tests__,powered-test}",
+      "!**/node_modules/*/{.bin,.editorconfig,.eslintrc*,.gitattributes,.gitignore,.npmignore,.nycrc*,.prettierrc*}"
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "build/icon.ico",
+      "publisherName": "Solutions",
+      "artifactName": "${productName} Setup ${version}.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Solutions VOD Tools",
+      "uninstallDisplayName": "Solutions VOD Tools",
+      "deleteAppDataOnUninstall": false
+    }
+  }
+}
