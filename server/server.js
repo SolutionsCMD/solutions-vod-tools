@@ -6,6 +6,7 @@ const os = require('os');
 const { PLATFORMS, getPlatform, watcherKey, parseWatcherKey } = require('./platforms');
 const quality = require('./quality');
 const { makeStore: makeSettingsStore } = require('./settings');
+const { startChatCapture } = require('./chat');
 
 /**
  * Boot the Express server in-process.
@@ -506,6 +507,26 @@ function startRecording(key) {
   watcher.currentTitlesPath = titlesPath;
   watcher.lastRecordedTitle = initialTitle;
 
+  // Start chat capture in parallel. Failures here don't affect the recording.
+  if (settings.get().chatLiveEnabled) {
+    try {
+      watcher.chatHandle = startChatCapture({
+        platform: watcher.platform,
+        channel: watcher.channel,
+        sessionDir,
+        lastStatus: watcher.lastStatus,
+        streamUrl: platform.streamUrl(watcher.channel),
+        ytdlpPath: YTDLP,
+      }, (msg) => {
+        // Pipe chat log lines into the watcher's logTail so they show in the UI.
+        watcher.logTail.push(msg);
+        if (watcher.logTail.length > 50) watcher.logTail.shift();
+      });
+    } catch (e) {
+      console.error(`[chat] failed to start for ${key}:`, e.message);
+    }
+  }
+
   if (!watcher.recordingHistory) watcher.recordingHistory = [];
   watcher.recordingHistory.push({
     sessionDir,
@@ -532,6 +553,12 @@ function startRecording(key) {
     const endedIso = new Date(endedAt).toISOString();
     if (watcher.recordingStartedAt) {
       watcher.recordingStoppedAt = endedAt;
+    }
+
+    // Stop chat capture (closes WebSockets, normalizes YT raw, etc.)
+    if (watcher.chatHandle) {
+      try { watcher.chatHandle.stop(); } catch (e) { /* ignore */ }
+      watcher.chatHandle = null;
     }
 
     // Update recordingHistory
@@ -1141,9 +1168,13 @@ app.get('/api/check', async (req, res) => {
       console.log(`[server] ffmpeg: ${FFMPEG}`);
 
       const performShutdown = async () => {
-        // Stop live watcher polling intervals
+        // Stop live watcher polling intervals + chat captures
         for (const [, w] of liveWatchers) {
           if (w.interval) clearInterval(w.interval);
+          if (w.chatHandle) {
+            try { w.chatHandle.stop(); } catch (e) { /* ignore */ }
+            w.chatHandle = null;
+          }
         }
         // Kill all tracked child jobs (yt-dlp downloads, ffmpeg encodes, recordings)
         for (const [, proc] of runningJobs.entries()) {
