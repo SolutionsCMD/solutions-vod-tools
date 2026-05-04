@@ -18,18 +18,29 @@ const { createServer } = require('./server/server');
 const { ensureBinaries } = require('./setup/dependencies');
 const { autoUpdater } = require('electron-updater');
 
+// -------- Logging --------
 // Pipe electron-updater logs to a file at:
 //   %APPDATA%\Solutions VOD Tools\logs\main.log
-// This is invaluable for debugging "nothing happens" symptoms.
+// We set this up BEFORE the single-instance lock check so that even an
+// instance that bails out immediately leaves a breadcrumb.
+let log = null;
+let logFilePath = null;
 try {
-  const log = require('electron-log');
+  log = require('electron-log');
   log.transports.file.level = 'info';
   log.transports.console.level = 'info';
   autoUpdater.logger = log;
-  log.info('[boot] electron-log wired into autoUpdater');
+  // Resolve the file path the user can open from the tray.
+  try { logFilePath = log.transports.file.getFile().path; } catch (e) { /* older electron-log */ }
 } catch (err) {
   console.error('[boot] electron-log not available:', err && err.message);
 }
+function logInfo(msg)  { try { log && log.info(msg); }  catch (e) {} console.log(msg); }
+function logWarn(msg)  { try { log && log.warn(msg); }  catch (e) {} console.warn(msg); }
+function logError(msg) { try { log && log.error(msg); } catch (e) {} console.error(msg); }
+
+logInfo(`[boot] starting v${app.getVersion()} pid=${process.pid} exe=${process.execPath}`);
+logInfo(`[boot] argv=${JSON.stringify(process.argv)}`);
 
 // We prompt the user before installing, instead of letting electron-updater
 // silently install on quit (would surprise people mid-recording).
@@ -38,9 +49,11 @@ autoUpdater.autoInstallOnAppQuit = false;
 
 // -------- Single-instance lock --------
 if (!app.requestSingleInstanceLock()) {
+  logWarn(`[boot] another instance has the single-instance lock — exiting pid=${process.pid}`);
   app.quit();
   process.exit(0);
 }
+logInfo(`[boot] acquired single-instance lock`);
 
 // -------- Paths --------
 const PORT = 3847;
@@ -150,6 +163,46 @@ function buildTrayMenu() {
     { type: 'separator' },
     { label: 'Restart server', click: restartServer },
     { label: 'Check for updates', click: checkForUpdatesManually },
+  );
+
+  // If the last update attempt failed, surface it so the user can act on it
+  // without having to dig through log files.
+  if (lastUpdateError) {
+    items.push({
+      label: 'Last update error: ' + lastUpdateError.slice(0, 60) + (lastUpdateError.length > 60 ? '…' : ''),
+      click: () => {
+        dialog.showMessageBox({
+          type: 'warning',
+          title: 'Last update error',
+          message: 'Auto-updater hit this error:',
+          detail: lastUpdateError + '\n\nTry "Check for updates" again, or open the log file for context.',
+          buttons: ['OK'],
+        });
+      },
+    });
+  }
+
+  // Diagnostics — give the user one-click access to the log file. Critical
+  // when "nothing happens" symptoms show up, since we can't reach into their
+  // shell to grep it.
+  items.push({ type: 'separator' });
+  items.push({
+    label: 'Open log file',
+    enabled: !!logFilePath,
+    click: () => {
+      if (logFilePath) shell.openPath(logFilePath);
+    },
+  });
+  items.push({
+    label: 'Open log folder',
+    click: () => {
+      if (logFilePath) shell.showItemInFolder(logFilePath);
+      else shell.openPath(path.join(userData, 'logs'));
+    },
+  });
+
+  items.push({ type: 'separator' });
+  items.push(
     { label: `Solutions VOD Tools v${app.getVersion()}`, enabled: false },
     { label: 'Quit', click: quitApp },
   );
@@ -203,13 +256,23 @@ async function quitApp() {
 
 // -------- Auto-updater --------
 let manualCheckInProgress = false;
+// Track whether we've already started downloading an update during this run.
+// If we have, an `error` event after that point means the download failed —
+// historically we silently swallowed it; v1.1.1 surfaces it.
+let downloadStarted = false;
+// Last updater error we saw, exposed via the tray menu so users can copy it.
+let lastUpdateError = null;
 
 autoUpdater.on('error', (err) => {
-  console.error('[updater] error:', err && err.message);
+  const msg = (err && err.message) || String(err);
+  logError(`[updater] error: ${msg}`);
+  lastUpdateError = msg;
+  if (tray) tray.setContextMenu(buildTrayMenu());
+
   if (manualCheckInProgress) {
     manualCheckInProgress = false;
     if (!isNoReleaseYetError(err)) {
-      dialog.showErrorBox('Update check failed', (err && err.message) || String(err));
+      dialog.showErrorBox('Update check failed', msg);
     } else {
       dialog.showMessageBox({
         type: 'info',
@@ -217,6 +280,25 @@ autoUpdater.on('error', (err) => {
         message: `You're on the latest version (${app.getVersion()}).`,
       });
     }
+    return;
+  }
+
+  // Background path: a download was in flight and just failed. Don't bug the
+  // user every time, but DO surface it once so they don't sit waiting forever
+  // for an "Update ready" prompt that will never come.
+  if (downloadStarted && !isNoReleaseYetError(err)) {
+    downloadStarted = false;
+    dialog.showMessageBox({
+      type: 'warning',
+      title: 'Update download failed',
+      message: 'The update download did not complete.',
+      detail:
+        msg +
+        '\n\nYou can try again from the tray menu (Check for updates), ' +
+        'or download the new installer directly from GitHub releases. ' +
+        'Open the log file from the tray menu for full details.',
+      buttons: ['OK'],
+    });
   }
 });
 
@@ -225,7 +307,9 @@ autoUpdater.on('checking-for-update', () => {
 });
 
 autoUpdater.on('update-available', (info) => {
-  console.log('[updater] update available:', info && info.version);
+  logInfo(`[updater] update available: ${info && info.version}`);
+  // autoDownload is true, so the download starts immediately after this fires.
+  downloadStarted = true;
   if (manualCheckInProgress) {
     manualCheckInProgress = false;
     dialog.showMessageBox({
@@ -251,12 +335,14 @@ autoUpdater.on('update-not-available', (info) => {
 });
 
 autoUpdater.on('download-progress', (p) => {
-  console.log(`[updater] downloading ${Math.round(p.percent)}% (${Math.round(p.bytesPerSecond/1024)} KB/s)`);
+  logInfo(`[updater] downloading ${Math.round(p.percent)}% (${Math.round(p.bytesPerSecond/1024)} KB/s)`);
 });
 
 autoUpdater.on('update-downloaded', (info) => {
-  console.log('[updater] update downloaded:', info && info.version);
+  logInfo(`[updater] update downloaded: ${info && info.version}`);
   updateDownloaded = true;
+  downloadStarted = false;
+  lastUpdateError = null;
   if (tray) tray.setContextMenu(buildTrayMenu());
 
   dialog.showMessageBox({
@@ -409,6 +495,17 @@ app.whenReady().then(async () => {
   if (!fs.existsSync(flagFirstRun)) {
     app.setLoginItemSettings({ openAtLogin: true, openAsHidden: true });
     try { fs.writeFileSync(flagFirstRun, ''); } catch (e) { /* ignore */ }
+  } else {
+    // If autostart is currently enabled, refresh the registered EXE path on
+    // every launch. This fixes a class of "won't auto-start" / "ghost
+    // already-running" bugs where the autostart registry entry points at an
+    // old install location (e.g. after a manual reinstall to a different
+    // directory).
+    const cur = app.getLoginItemSettings();
+    if (cur.openAtLogin) {
+      app.setLoginItemSettings({ openAtLogin: true, openAsHidden: true });
+      logInfo(`[boot] refreshed autostart entry for current exe path`);
+    }
   }
 
   // Download yt-dlp + ffmpeg on first run (or after manual deletion).
