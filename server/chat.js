@@ -141,9 +141,10 @@ function parseTwitchPrivmsg(line) {
 // yt-dlp's Kick extractor reaches the channels API server-side without the
 // Cloudflare 403 we get from a direct fetch. Asking it for `--dump-json` on
 // a Kick channel URL gets back a metadata blob whose shape varies by
-// yt-dlp version, so we scan recursively for any field that looks like a
-// chatroom id.
-function resolveChatroomIdViaYtdlp(ytdlpPath, channel, log) {
+// yt-dlp version. Returns { chatroomId?, channelId? } — chatroomId is the
+// holy grail; channelId is a useful fallback we can pass to numeric-id
+// API endpoints which sometimes have different Cloudflare protection.
+function resolveViaYtdlp(ytdlpPath, channel, log) {
   return new Promise((resolve) => {
     const p = spawn(ytdlpPath, [
       '--dump-json',
@@ -173,17 +174,14 @@ function resolveChatroomIdViaYtdlp(ytdlpPath, channel, log) {
         resolve(null);
         return;
       }
-      const id = findChatroomIdRecursive(info);
-      if (id) {
-        log(`[chat] kick: resolved chatroom_id ${id} via yt-dlp metadata`);
-        resolve(id);
+      const chatroomId = findChatroomIdRecursive(info);
+      const channelId = info?.channel_id ? parseInt(info.channel_id, 10) || null : null;
+      if (chatroomId) {
+        log(`[chat] kick: resolved chatroom_id ${chatroomId} via yt-dlp metadata`);
       } else {
-        // List the top-level keys so we can see what yt-dlp actually returns
-        // for Kick on the user's machine — useful if a future yt-dlp version
-        // adds chatroom info under a new field name.
-        log(`[chat] kick: yt-dlp metadata had no chatroom-shaped field (top-level keys: ${Object.keys(info).slice(0,30).join(',')})`);
-        resolve(null);
+        log(`[chat] kick: yt-dlp metadata had no chatroom-shaped field (top-level keys: ${Object.keys(info).slice(0,30).join(',')})${channelId ? ', will try numeric channel_id ' + channelId : ''}`);
       }
+      resolve({ chatroomId, channelId });
     });
   });
 }
@@ -351,15 +349,82 @@ function startKickChat(channel, sessionDir, log, lastStatus, ytdlpPath) {
     // 5) yt-dlp metadata — yt-dlp's Kick extractor clearly bypasses
     //    Cloudflare (recordings work). Ask it for channel metadata via
     //    --dump-json and scan for any chatroom-id-shaped field.
+    let numericChannelId = null;
     if (ytdlpPath) {
       try {
-        const id = await resolveChatroomIdViaYtdlp(ytdlpPath, channel, log);
-        if (id) return id;
+        const result = await resolveViaYtdlp(ytdlpPath, channel, log);
+        if (result?.chatroomId) return result.chatroomId;
+        numericChannelId = result?.channelId || null;
       } catch (e) {
         log(`[chat] kick: yt-dlp resolve threw: ${e.message}`);
       }
     } else {
       log(`[chat] kick: ytdlpPath not provided, skipping yt-dlp fallback`);
+    }
+
+    // 6) Numeric channel_id against the Kick API. Cloudflare's blocking
+    //    sometimes hits slug-based requests harder than numeric-id ones —
+    //    yt-dlp got us the channel_id, so try the same endpoints again
+    //    using the numeric path.
+    if (numericChannelId) {
+      const numericPaths = [
+        `https://kick.com/api/v2/channels/${numericChannelId}`,
+        `https://kick.com/api/v1/channels/${numericChannelId}`,
+        `https://kick.com/api/v2/channels/${numericChannelId}/chatroom`,
+      ];
+      for (const url of numericPaths) {
+        try {
+          const res = await fetch(url, { headers: browserHeaders });
+          if (!res.ok) {
+            log(`[chat] kick: ${url} -> ${res.status}`);
+            continue;
+          }
+          const data = await res.json();
+          // /chatroom endpoint returns the chatroom object directly; the
+          // /channels/:id endpoint nests it.
+          const id = data?.chatroom?.id || data?.chatroom_id || data?.id || null;
+          if (id) {
+            log(`[chat] kick: resolved chatroom_id ${id} via numeric Kick API (${url})`);
+            return id;
+          }
+          log(`[chat] kick: ${url} 200 but no chatroom_id (keys: ${Object.keys(data || {}).join(',')})`);
+        } catch (e) {
+          log(`[chat] kick: ${url} threw: ${e.message}`);
+        }
+      }
+
+      // 7) kicklet.app stats endpoints with numeric channel_id. The user
+      //    confirmed /api/stats/public/<id>/... works for them; we don't
+      //    know which sub-endpoint exposes chatroom info, so try a few.
+      const kickletStatPaths = [
+        `https://kicklet.app/api/stats/public/${numericChannelId}/info`,
+        `https://kicklet.app/api/stats/public/${numericChannelId}/channel`,
+        `https://kicklet.app/api/stats/public/${numericChannelId}/chatroom`,
+        `https://kicklet.app/api/channel/${numericChannelId}`,
+      ];
+      for (const url of kickletStatPaths) {
+        try {
+          const res = await fetch(url, {
+            headers: { 'User-Agent': KICK_UA, 'Accept': 'application/json' },
+          });
+          if (!res.ok) {
+            log(`[chat] kick: kicklet ${url} -> ${res.status}`);
+            continue;
+          }
+          const text = await res.text();
+          const m = text.match(/"chatroom_id"\s*:\s*(\d+)/) ||
+                    text.match(/"chatroom"\s*:\s*\{[^}]*?"id"\s*:\s*(\d+)/) ||
+                    text.match(/"chatroomId"\s*:\s*(\d+)/);
+          if (m) {
+            const id = parseInt(m[1], 10);
+            log(`[chat] kick: resolved chatroom_id ${id} via kicklet stats (${url})`);
+            return id;
+          }
+          log(`[chat] kick: kicklet ${url} 200 but no chatroom_id (${text.length} bytes)`);
+        } catch (e) {
+          log(`[chat] kick: kicklet ${url} threw: ${e.message}`);
+        }
+      }
     }
 
     return null;
