@@ -1,6 +1,6 @@
 {
   "name": "solutions-vod-tools",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "description": "Desktop app for downloading, recording, trimming, and stitching Kick VODs",
   "main": "main.js",
   "author": {
