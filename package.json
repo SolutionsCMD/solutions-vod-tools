@@ -63,7 +63,7 @@
       ],
       "icon": "build/icon.ico",
       "publisherName": "Solutions",
-      "artifactName": "${productName} Setup ${version}.${ext}"
+      "artifactName": "Solutions-VOD-Tools-Setup-${version}.${ext}"
     },
     "nsis": {
       "oneClick": false,
