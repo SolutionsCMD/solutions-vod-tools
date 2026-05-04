@@ -17,6 +17,7 @@
 
 const fs = require('fs');
 const path = require('path');
+const os = require('os');
 const { spawn } = require('child_process');
 
 let WebSocketLib = null;
@@ -186,6 +187,93 @@ function resolveViaYtdlp(ytdlpPath, channel, log) {
   });
 }
 
+// yt-dlp --write-pages dumps every HTTP response body to disk while doing
+// extraction. The Kick extractor must hit /api/v2/channels/<channel> (or
+// equivalent) to resolve the stream URL — that response WILL contain the
+// chatroom info, even when --dump-json's output schema doesn't surface it.
+// We spawn yt-dlp into a temp dir, scan the dumped pages for any matching
+// chatroom_id pattern, then clean up.
+function resolveChatroomIdViaWritePages(ytdlpPath, channel, log) {
+  return new Promise((resolve) => {
+    let tempDir;
+    try {
+      tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'kick-pages-'));
+    } catch (e) {
+      log(`[chat] kick: --write-pages tempdir creation failed: ${e.message}`);
+      resolve(null);
+      return;
+    }
+
+    const cleanup = () => {
+      try { fs.rmSync(tempDir, { recursive: true, force: true }); } catch (e) { /* ignore */ }
+    };
+
+    const p = spawn(ytdlpPath, [
+      '--write-pages',
+      '--skip-download',
+      '--no-warnings',
+      '--no-playlist',
+      '--paths', tempDir,
+      // --write-pages dumps to the cwd, not -P, so also chdir there
+      `https://kick.com/${channel}`,
+    ], { windowsHide: true, cwd: tempDir });
+
+    let stderr = '';
+    p.stderr.on('data', d => stderr += d.toString());
+    p.on('error', (e) => {
+      log(`[chat] kick: --write-pages spawn failed: ${e.message}`);
+      cleanup();
+      resolve(null);
+    });
+    p.on('close', (code) => {
+      let foundId = null;
+      let scannedFiles = 0;
+      try {
+        // Walk the temp dir recursively; --write-pages may write into
+        // subdirectories named after the extractor.
+        const allFiles = walkDir(tempDir, []);
+        scannedFiles = allFiles.length;
+        for (const filePath of allFiles) {
+          try {
+            const stat = fs.statSync(filePath);
+            // Skip very large files (recording fragments etc) and binary-ish
+            // files with no text content.
+            if (!stat.isFile() || stat.size > 5_000_000) continue;
+            const content = fs.readFileSync(filePath, 'utf8');
+            const m = content.match(/"chatroom"\s*:\s*\{[^}]*?"id"\s*:\s*(\d+)/) ||
+                      content.match(/"chatroom_id"\s*:\s*(\d+)/) ||
+                      content.match(/"chatroomId"\s*:\s*(\d+)/);
+            if (m) {
+              foundId = parseInt(m[1], 10);
+              log(`[chat] kick: resolved chatroom_id ${foundId} via yt-dlp --write-pages (${path.basename(filePath)})`);
+              break;
+            }
+          } catch (e) { /* ignore individual file errors */ }
+        }
+      } catch (e) {
+        log(`[chat] kick: --write-pages scan failed: ${e.message}`);
+      }
+
+      if (!foundId) {
+        log(`[chat] kick: --write-pages produced ${scannedFiles} files, none contained chatroom_id (yt-dlp exit ${code}, stderr tail: ${stderr.trim().slice(-200)})`);
+      }
+      cleanup();
+      resolve(foundId);
+    });
+  });
+}
+
+function walkDir(dir, acc) {
+  try {
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      const p = path.join(dir, entry.name);
+      if (entry.isDirectory()) walkDir(p, acc);
+      else acc.push(p);
+    }
+  } catch (e) { /* ignore */ }
+  return acc;
+}
+
 function findChatroomIdRecursive(obj, depth = 0) {
   if (!obj || typeof obj !== 'object' || depth > 6) return null;
   for (const [key, val] of Object.entries(obj)) {
@@ -310,121 +398,30 @@ function startKickChat(channel, sessionDir, log, lastStatus, ytdlpPath) {
       log(`[chat] kick: channel page HTML fetch threw: ${e.message}`);
     }
 
-    // 4) kicklet.app — third-party Kick analytics site. Their backend talks
-    //    to Kick from server-side IPs that aren't blocked, and they expose
-    //    channel data through their own pages/endpoints. Try a few common
-    //    URL shapes; whichever returns chatroom info wins.
-    const kickletUrls = [
-      `https://kicklet.app/${encodeURIComponent(channel)}`,
-      `https://kicklet.app/api/channel/${encodeURIComponent(channel)}`,
-      `https://kicklet.app/api/channels/${encodeURIComponent(channel)}`,
-      `https://kicklet.app/api/v1/channel/${encodeURIComponent(channel)}`,
-      `https://kicklet.app/api/streamer/${encodeURIComponent(channel)}`,
-    ];
-    for (const url of kickletUrls) {
-      try {
-        const res = await fetch(url, {
-          headers: { 'User-Agent': KICK_UA, 'Accept': 'application/json, text/html, */*' },
-        });
-        if (!res.ok) {
-          log(`[chat] kick: kicklet ${url} -> ${res.status}`);
-          continue;
-        }
-        const text = await res.text();
-        // Match across both JSON and HTML body shapes.
-        const m = text.match(/"chatroom_id"\s*:\s*(\d+)/) ||
-                  text.match(/"chatroom"\s*:\s*\{[^}]*?"id"\s*:\s*(\d+)/) ||
-                  text.match(/chatroomId["'\s:=]+(\d{5,})/i);
-        if (m) {
-          const id = parseInt(m[1], 10);
-          log(`[chat] kick: resolved chatroom_id ${id} via kicklet.app (${url})`);
-          return id;
-        }
-        log(`[chat] kick: kicklet ${url} 200 but no chatroom_id pattern (${text.length} bytes)`);
-      } catch (e) {
-        log(`[chat] kick: kicklet ${url} threw: ${e.message}`);
-      }
-    }
-
-    // 5) yt-dlp metadata — yt-dlp's Kick extractor clearly bypasses
-    //    Cloudflare (recordings work). Ask it for channel metadata via
-    //    --dump-json and scan for any chatroom-id-shaped field.
-    let numericChannelId = null;
+    // 4) yt-dlp --dump-json — yt-dlp's Kick extractor clearly bypasses
+    //    Cloudflare (recordings work). Older versions don't surface
+    //    chatroom_id in --dump-json output, but newer ones do.
     if (ytdlpPath) {
       try {
         const result = await resolveViaYtdlp(ytdlpPath, channel, log);
         if (result?.chatroomId) return result.chatroomId;
-        numericChannelId = result?.channelId || null;
       } catch (e) {
-        log(`[chat] kick: yt-dlp resolve threw: ${e.message}`);
+        log(`[chat] kick: yt-dlp dump-json resolve threw: ${e.message}`);
       }
     } else {
-      log(`[chat] kick: ytdlpPath not provided, skipping yt-dlp fallback`);
+      log(`[chat] kick: ytdlpPath not provided, skipping yt-dlp fallbacks`);
+      return null;
     }
 
-    // 6) Numeric channel_id against the Kick API. Cloudflare's blocking
-    //    sometimes hits slug-based requests harder than numeric-id ones —
-    //    yt-dlp got us the channel_id, so try the same endpoints again
-    //    using the numeric path.
-    if (numericChannelId) {
-      const numericPaths = [
-        `https://kick.com/api/v2/channels/${numericChannelId}`,
-        `https://kick.com/api/v1/channels/${numericChannelId}`,
-        `https://kick.com/api/v2/channels/${numericChannelId}/chatroom`,
-      ];
-      for (const url of numericPaths) {
-        try {
-          const res = await fetch(url, { headers: browserHeaders });
-          if (!res.ok) {
-            log(`[chat] kick: ${url} -> ${res.status}`);
-            continue;
-          }
-          const data = await res.json();
-          // /chatroom endpoint returns the chatroom object directly; the
-          // /channels/:id endpoint nests it.
-          const id = data?.chatroom?.id || data?.chatroom_id || data?.id || null;
-          if (id) {
-            log(`[chat] kick: resolved chatroom_id ${id} via numeric Kick API (${url})`);
-            return id;
-          }
-          log(`[chat] kick: ${url} 200 but no chatroom_id (keys: ${Object.keys(data || {}).join(',')})`);
-        } catch (e) {
-          log(`[chat] kick: ${url} threw: ${e.message}`);
-        }
-      }
-
-      // 7) kicklet.app stats endpoints with numeric channel_id. The user
-      //    confirmed /api/stats/public/<id>/... works for them; we don't
-      //    know which sub-endpoint exposes chatroom info, so try a few.
-      const kickletStatPaths = [
-        `https://kicklet.app/api/stats/public/${numericChannelId}/info`,
-        `https://kicklet.app/api/stats/public/${numericChannelId}/channel`,
-        `https://kicklet.app/api/stats/public/${numericChannelId}/chatroom`,
-        `https://kicklet.app/api/channel/${numericChannelId}`,
-      ];
-      for (const url of kickletStatPaths) {
-        try {
-          const res = await fetch(url, {
-            headers: { 'User-Agent': KICK_UA, 'Accept': 'application/json' },
-          });
-          if (!res.ok) {
-            log(`[chat] kick: kicklet ${url} -> ${res.status}`);
-            continue;
-          }
-          const text = await res.text();
-          const m = text.match(/"chatroom_id"\s*:\s*(\d+)/) ||
-                    text.match(/"chatroom"\s*:\s*\{[^}]*?"id"\s*:\s*(\d+)/) ||
-                    text.match(/"chatroomId"\s*:\s*(\d+)/);
-          if (m) {
-            const id = parseInt(m[1], 10);
-            log(`[chat] kick: resolved chatroom_id ${id} via kicklet stats (${url})`);
-            return id;
-          }
-          log(`[chat] kick: kicklet ${url} 200 but no chatroom_id (${text.length} bytes)`);
-        } catch (e) {
-          log(`[chat] kick: kicklet ${url} threw: ${e.message}`);
-        }
-      }
+    // 5) yt-dlp --write-pages — the silver bullet when --dump-json doesn't
+    //    expose chatroom_id. yt-dlp must be fetching the channels API
+    //    successfully to get the stream URL; --write-pages dumps every
+    //    HTTP response body to disk. We grep those for chatroom_id.
+    try {
+      const id = await resolveChatroomIdViaWritePages(ytdlpPath, channel, log);
+      if (id) return id;
+    } catch (e) {
+      log(`[chat] kick: yt-dlp --write-pages threw: ${e.message}`);
     }
 
     return null;
