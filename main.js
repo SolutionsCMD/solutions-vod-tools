@@ -47,6 +47,17 @@ logInfo(`[boot] argv=${JSON.stringify(process.argv)}`);
 autoUpdater.autoDownload = true;
 autoUpdater.autoInstallOnAppQuit = false;
 
+// We don't have a code-signing certificate. Without one, electron-updater's
+// publisher-name check rejects every new installer on Windows, which silently
+// killed every auto-update attempt from v1.0.3 → v1.1.1. The package.json
+// build config no longer sets publisherName (so future builds skip the
+// check by default), and we explicitly disable signature verification here
+// in case any inherited setting still tries to enforce it.
+//
+// If we ever buy a code-signing cert, remove this override and put
+// publisherName back in the build config.
+autoUpdater.verifyUpdateCodeSignature = () => Promise.resolve(null);
+
 // -------- Single-instance lock --------
 if (!app.requestSingleInstanceLock()) {
   logWarn(`[boot] another instance has the single-instance lock — exiting pid=${process.pid}`);

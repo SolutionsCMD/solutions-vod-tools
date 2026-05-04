@@ -343,10 +343,24 @@ function extractYoutubeChatEntries(obj) {
 // Public API
 // ============================================================
 function startChatCapture({ platform, channel, sessionDir, lastStatus, streamUrl, ytdlpPath }, log) {
-  const safeLog = (msg) => { try { log(msg); console.log(msg); } catch (e) { /* ignore */ } };
+  // Write a per-session chat.log file alongside chat.jsonl so failures are
+  // visible after the fact. Without this, chat capture errors only existed
+  // in the in-memory watcher logTail, which vanishes the moment the app
+  // restarts — making "where's chat.jsonl?" undebuggable.
   try {
     fs.mkdirSync(sessionDir, { recursive: true });
   } catch (e) { /* ignore */ }
+  const chatLogPath = path.join(sessionDir, 'chat.log');
+  const safeLog = (msg) => {
+    const line = `[${new Date().toISOString()}] ${msg}`;
+    try { fs.appendFileSync(chatLogPath, line + '\n'); } catch (e) { /* ignore */ }
+    try { log(msg); console.log(msg); } catch (e) { /* ignore */ }
+  };
+
+  // Always emit a startup line so we can prove chat capture was at least
+  // attempted, even if the platform-specific code dies before writing
+  // anything else.
+  safeLog(`[chat] starting capture: platform=${platform} channel=${channel} ws=${WebSocketLib ? 'available' : 'MISSING'}`);
 
   switch (platform) {
     case 'twitch':  return startTwitchChat(channel, sessionDir, safeLog);
