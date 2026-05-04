@@ -357,12 +357,15 @@ async function streamJob(tab, url, body) {
 
 document.getElementById('btn-start-download').addEventListener('click', () => {
   const url = document.getElementById('url').value.trim();
-  if (!url) { alert('Paste a Kick VOD URL first.'); return; }
+  if (!url) { alert('Paste a VOD URL first (Kick, Twitch, or YouTube).'); return; }
   streamJob('download', '/api/download', {
     url,
     startTime: document.getElementById('start').value,
     endTime: document.getElementById('end').value,
     outputDir: document.getElementById('outputDir').value,
+    qualityPreset: qualityState.downloadPreset,
+    customFormat: qualityState.appSettings && qualityState.appSettings.customFormat,
+    includeChatReplay: document.getElementById('dl-include-chat').checked,
   });
 });
 
@@ -600,7 +603,7 @@ function updateCutCard(watchers) {
   const latest = candidates[0];
 
   document.getElementById('cut-card').style.display = 'block';
-  cutCardWatcher = latest.username;
+  cutCardWatcher = { platform: latest.platform, channel: latest.channel };
 
   const fileChanged = latest.latestOutput !== cutCardFile;
   if (fileChanged) {
@@ -629,7 +632,8 @@ function updateCutCard(watchers) {
   if (related.length >= 2 && !isStitched) {
     stitchBtn.style.display = 'inline-block';
     stitchBtn.textContent = `Auto-stitch ${related.length} parts first`;
-    stitchBtn.dataset.username = latest.username;
+    stitchBtn.dataset.platform = latest.platform;
+    stitchBtn.dataset.channel = latest.channel;
     stitchBtn.dataset.count = related.length;
   } else {
     stitchBtn.style.display = 'none';
@@ -779,10 +783,11 @@ document.addEventListener('click', (e) => {
 
 document.getElementById('btn-auto-stitch').addEventListener('click', async () => {
   const btn = document.getElementById('btn-auto-stitch');
-  const username = btn.dataset.username;
+  const platform = btn.dataset.platform;
+  const channel = btn.dataset.channel;
   const count = btn.dataset.count;
-  if (!username) return;
-  if (!confirm(`Stitch the last ${count} recording parts for ${username} into one file?\n\nThe originals will be kept. The combined file will appear in the trim card above.`)) return;
+  if (!platform || !channel) return;
+  if (!confirm(`Stitch the last ${count} recording parts for ${channel} into one file?\n\nThe originals will be kept. The combined file will appear in the trim card above.`)) return;
 
   const pill = document.getElementById('status-cut');
   const result = document.getElementById('result-cut');
@@ -800,7 +805,7 @@ document.getElementById('btn-auto-stitch').addEventListener('click', async () =>
     const res = await fetch('/api/live/auto-stitch', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ username }),
+      body: JSON.stringify({ platform, channel }),
     });
     const reader = res.body.getReader();
     const decoder = new TextDecoder();
@@ -920,7 +925,7 @@ function renderLiveWatchers(data) {
       list.appendChild(window.emptyState({
         icon: window.icons.live,
         title: 'No channels being watched',
-        body: 'Add a Kick username above to start auto-recording streams the moment they go live.',
+        body: 'Pick a platform and add a channel name above to start auto-recording streams the moment they go live.',
       }));
     }
     return;
@@ -948,12 +953,13 @@ function renderLiveWatchers(data) {
       stats += `<div><div class="watcher-stat-label">Auto-record</div><div class="watcher-stat-value" style="color: var(--warn);">Paused${liveNow ? ' (stream is live)' : ''}</div></div>`;
     } else {
       const ls = w.lastStatus || {};
+      const pollSec = w.pollIntervalMs ? Math.round(w.pollIntervalMs / 1000) : '—';
       if (ls.live === false && ls.error) {
         stats += `<div><div class="watcher-stat-label">Status</div><div class="watcher-stat-value" style="color: var(--danger);">Error: ${ls.error}</div></div>`;
       } else if (ls.live === false && ls.exists === false) {
         stats += `<div><div class="watcher-stat-label">Status</div><div class="watcher-stat-value" style="color: var(--danger);">Channel not found</div></div>`;
       } else {
-        stats += `<div><div class="watcher-stat-label">Status</div><div class="watcher-stat-value">Offline (poll every ${Math.round(data.pollInterval / 1000)}s)</div></div>`;
+        stats += `<div><div class="watcher-stat-label">Status</div><div class="watcher-stat-value">Offline (poll every ${pollSec}s)</div></div>`;
       }
       if (ls.viewers != null && ls.live) {
         stats += `<div><div class="watcher-stat-label">Viewers</div><div class="watcher-stat-value">${ls.viewers.toLocaleString()}</div></div>`;
@@ -966,18 +972,22 @@ function renderLiveWatchers(data) {
       stats += `<div style="grid-column: 1 / -1;"><div class="watcher-stat-label">Stream title</div><div class="watcher-stat-value">${escapeHtmlStr(w.lastStatus.title)}</div></div>`;
     }
 
+    const platformAttr = `data-platform="${escapeHtmlStr(w.platform)}" data-channel="${escapeHtmlStr(w.channel)}"`;
     let buttons = '';
     if (isRec) {
-      buttons += `<button class="watcher-btn danger" onclick="stopRecording('${w.username}')">Stop recording</button>`;
+      buttons += `<button class="watcher-btn danger" data-action="stop-recording" ${platformAttr}>Stop recording</button>`;
     } else if (isPaused) {
-      buttons += `<button class="watcher-btn" onclick="resumeWatcher('${w.username}')">Resume auto-record</button>`;
+      buttons += `<button class="watcher-btn" data-action="resume" ${platformAttr}>Resume auto-record</button>`;
     }
-    buttons += `<button class="watcher-btn" onclick="unwatchChannel('${w.username}')">Unwatch</button>`;
+    buttons += `<button class="watcher-btn" data-action="unwatch" ${platformAttr}>Unwatch</button>`;
+
+    const badgeClass = `platform-badge ${w.platform}`;
+    const badgeText = escapeHtmlStr(w.platformDisplayName || w.platform);
 
     html += `
       <div class="${cardClass}">
         <div class="watcher-header">
-          <div class="watcher-name">${escapeHtmlStr(w.username)}</div>
+          <div class="watcher-name"><span class="${badgeClass}">${badgeText}</span>${escapeHtmlStr(w.channel)}</div>
           <div class="${pillClass}">${pillText}</div>
         </div>
         <div class="watcher-body">${stats}</div>
@@ -994,46 +1004,84 @@ function escapeHtmlStr(str) {
   return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 }
 
-async function stopRecording(username) {
-  if (!confirm(`Stop the current recording of ${username}?\n\nThe file so far will be kept. Auto-recording will be paused until you hit Resume.`)) return;
+async function stopRecording(platform, channel) {
+  if (!confirm(`Stop the current recording of ${channel}?\n\nThe file so far will be kept. Auto-recording will be paused until you hit Resume.`)) return;
   await fetch('/api/live/stop-recording', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ username }),
+    body: JSON.stringify({ platform, channel }),
   });
   refreshLive();
 }
 
-async function resumeWatcher(username) {
+async function resumeWatcher(platform, channel) {
   await fetch('/api/live/resume', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ username }),
+    body: JSON.stringify({ platform, channel }),
   });
   refreshLive();
 }
 
-async function unwatchChannel(username) {
-  if (!confirm(`Stop watching ${username}?\n\nAny ongoing recording will be stopped and the file kept.`)) return;
+async function unwatchChannel(platform, channel) {
+  if (!confirm(`Stop watching ${channel}?\n\nAny ongoing recording will be stopped and the file kept.`)) return;
   await fetch('/api/live/stop', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ username, killRecording: true }),
+    body: JSON.stringify({ platform, channel, killRecording: true }),
   });
   refreshLive();
 }
 
+// Delegated click handler for watcher action buttons
+document.getElementById('watchers-list').addEventListener('click', (e) => {
+  const btn = e.target.closest('button[data-action]');
+  if (!btn) return;
+  const action = btn.dataset.action;
+  const platform = btn.dataset.platform;
+  const channel = btn.dataset.channel;
+  if (!platform || !channel) return;
+  if (action === 'stop-recording') stopRecording(platform, channel);
+  else if (action === 'resume') resumeWatcher(platform, channel);
+  else if (action === 'unwatch') unwatchChannel(platform, channel);
+});
+
+// Per-platform input hint and placeholder so the user knows what to paste.
+const PLATFORM_HINTS = {
+  kick: {
+    placeholder: 'Channel name (e.g. mizkif)',
+    hint: 'The app polls Kick every 5s for live status. Recording starts automatically when the stream goes live.',
+  },
+  twitch: {
+    placeholder: 'Twitch login or twitch.tv URL',
+    hint: 'The app polls Twitch every 30s via yt-dlp. Recording starts automatically when the stream goes live.',
+  },
+  youtube: {
+    placeholder: '@handle, channel ID, or YouTube URL',
+    hint: 'The app polls YouTube every 30s for a live broadcast on this channel. Recording starts automatically when one starts.',
+  },
+};
+
+function applyPlatformHint() {
+  const platform = document.getElementById('live-platform').value;
+  const cfg = PLATFORM_HINTS[platform] || PLATFORM_HINTS.kick;
+  document.getElementById('live-username').placeholder = cfg.placeholder;
+  document.getElementById('live-input-hint').textContent = cfg.hint;
+}
+document.getElementById('live-platform').addEventListener('change', applyPlatformHint);
+applyPlatformHint();
+
 document.getElementById('btn-add-watcher').addEventListener('click', async () => {
   const input = document.getElementById('live-username');
-  const username = input.value.trim().toLowerCase();
-  if (!username) { alert('Enter a Kick username first.'); return; }
-  if (!/^[a-zA-Z0-9_.-]+$/.test(username)) { alert('Invalid username format.'); return; }
+  const platform = document.getElementById('live-platform').value;
+  const channel = input.value.trim();
+  if (!channel) { alert('Enter a channel name first.'); return; }
 
   try {
     const res = await fetch('/api/live/start', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ username }),
+      body: JSON.stringify({ platform, channel }),
     });
     if (!res.ok) {
       const err = await res.json();
@@ -1068,6 +1116,215 @@ window.addEventListener('page-changed', (e) => {
 });
 
 
+
+// ---------- Quality presets + settings ----------
+// State shared across the three chip surfaces (download form, live form,
+// settings page). The download chip is per-job (kept only in memory). The
+// live + settings chips read from / write to /api/settings.
+const qualityState = {
+  presets: [],            // [{id, label}]
+  appSettings: null,      // last fetched settings object
+  downloadPreset: null,   // not persisted; resets to settings.qualityDefault on load
+};
+
+const PLATFORM_LIST = [
+  { id: 'kick', label: 'Kick' },
+  { id: 'twitch', label: 'Twitch' },
+  { id: 'youtube', label: 'YouTube' },
+];
+
+function findPreset(id) {
+  return qualityState.presets.find(p => p.id === id);
+}
+
+function renderChipRow(targetEl, selectedId, onSelect) {
+  if (!targetEl) return;
+  targetEl.innerHTML = '';
+  for (const p of qualityState.presets) {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'quality-chip' + (p.id === selectedId ? ' active' : '');
+    btn.textContent = p.label;
+    btn.dataset.preset = p.id;
+    btn.addEventListener('click', () => onSelect(p.id));
+    targetEl.appendChild(btn);
+  }
+}
+
+function renderDownloadChips() {
+  renderChipRow(
+    document.getElementById('quality-chips-download'),
+    qualityState.downloadPreset,
+    (id) => { qualityState.downloadPreset = id; renderDownloadChips(); updateDownloadHint(); },
+  );
+}
+
+function updateDownloadHint() {
+  const el = document.getElementById('quality-hint-download');
+  if (!el) return;
+  const p = findPreset(qualityState.downloadPreset);
+  el.textContent = p ? `${p.label} — used for this download only.` : '';
+}
+
+function renderLiveChips() {
+  const settings = qualityState.appSettings || {};
+  renderChipRow(
+    document.getElementById('quality-chips-live'),
+    settings.qualityDefault,
+    async (id) => {
+      // Live tab chip change updates the global default. Per-platform overrides
+      // (set in Settings) still take precedence at recording time.
+      await saveSettings({ qualityDefault: id });
+      renderAllQualityUI();
+    },
+  );
+  const el = document.getElementById('quality-hint-live');
+  if (el) {
+    const p = findPreset(settings.qualityDefault);
+    el.textContent = p
+      ? `${p.label} — applies to new recordings. Existing recordings aren't affected. Per-platform overrides in Settings take precedence.`
+      : '';
+  }
+}
+
+function renderSettingsQualityChips() {
+  const settings = qualityState.appSettings || {};
+  renderChipRow(
+    document.getElementById('quality-chips-settings'),
+    settings.qualityDefault,
+    async (id) => {
+      await saveSettings({ qualityDefault: id });
+      renderAllQualityUI();
+    },
+  );
+  const el = document.getElementById('quality-hint-settings');
+  if (el) {
+    const p = findPreset(settings.qualityDefault);
+    el.textContent = p ? `Default: ${p.label}` : '';
+  }
+}
+
+function renderPerPlatformOverrides() {
+  const wrap = document.getElementById('quality-per-platform');
+  if (!wrap) return;
+  const settings = qualityState.appSettings || {};
+  const overrides = settings.qualityPerPlatform || {};
+  wrap.innerHTML = '';
+  for (const plat of PLATFORM_LIST) {
+    const row = document.createElement('div');
+    row.className = 'quality-per-platform-row';
+    const badge = document.createElement('span');
+    badge.className = `platform-badge ${plat.id}`;
+    badge.textContent = plat.label;
+    row.appendChild(badge);
+
+    const sel = document.createElement('select');
+    const noneOpt = document.createElement('option');
+    noneOpt.value = '';
+    noneOpt.textContent = '— use default —';
+    sel.appendChild(noneOpt);
+    for (const p of qualityState.presets) {
+      const opt = document.createElement('option');
+      opt.value = p.id;
+      opt.textContent = p.label;
+      sel.appendChild(opt);
+    }
+    sel.value = overrides[plat.id] || '';
+    sel.addEventListener('change', async () => {
+      const next = { ...overrides, [plat.id]: sel.value || null };
+      await saveSettings({ qualityPerPlatform: next });
+      renderAllQualityUI();
+    });
+    row.appendChild(sel);
+    wrap.appendChild(row);
+  }
+}
+
+function renderAdvancedQualityToggle() {
+  const settings = qualityState.appSettings || {};
+  const toggle = document.getElementById('setting-advanced-quality');
+  const field = document.getElementById('custom-format-field');
+  const input = document.getElementById('setting-custom-format');
+  if (!toggle || !field || !input) return;
+  toggle.checked = !!settings.advancedQualityEnabled;
+  field.style.display = settings.advancedQualityEnabled ? '' : 'none';
+  input.value = settings.customFormat || '';
+}
+
+function renderChatToggles() {
+  const settings = qualityState.appSettings || {};
+  const live = document.getElementById('setting-chat-live');
+  const vod  = document.getElementById('setting-chat-vod');
+  if (live) live.checked = !!settings.chatLiveEnabled;
+  if (vod)  vod.checked  = !!settings.chatVodReplayEnabled;
+  // Mirror the per-job download checkbox to the saved default so the user
+  // doesn't have to tick it every time.
+  const dlChat = document.getElementById('dl-include-chat');
+  if (dlChat) dlChat.checked = !!settings.chatVodReplayEnabled;
+}
+
+function renderAllQualityUI() {
+  renderDownloadChips();
+  updateDownloadHint();
+  renderLiveChips();
+  renderSettingsQualityChips();
+  renderPerPlatformOverrides();
+  renderAdvancedQualityToggle();
+  renderChatToggles();
+}
+
+async function saveSettings(patch) {
+  try {
+    const res = await fetch('/api/settings', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(patch),
+    });
+    qualityState.appSettings = await res.json();
+  } catch (err) {
+    console.error('[settings] save failed:', err);
+  }
+}
+
+async function loadQualityAndSettings() {
+  try {
+    const [presetsRes, settingsRes] = await Promise.all([
+      fetch('/api/quality/presets').then(r => r.json()),
+      fetch('/api/settings').then(r => r.json()),
+    ]);
+    qualityState.presets = presetsRes.presets || [];
+    qualityState.appSettings = settingsRes;
+    qualityState.downloadPreset = settingsRes.qualityDefault || 'source';
+    renderAllQualityUI();
+  } catch (err) {
+    console.error('[quality] failed to load presets/settings:', err);
+  }
+}
+
+// Wire settings page toggles (advanced quality + custom format + chat).
+document.addEventListener('DOMContentLoaded', () => {
+  const advToggle = document.getElementById('setting-advanced-quality');
+  if (advToggle) {
+    advToggle.addEventListener('change', async () => {
+      await saveSettings({ advancedQualityEnabled: advToggle.checked });
+      renderAdvancedQualityToggle();
+    });
+  }
+  const customInput = document.getElementById('setting-custom-format');
+  if (customInput) {
+    let timer = null;
+    customInput.addEventListener('input', () => {
+      clearTimeout(timer);
+      timer = setTimeout(() => saveSettings({ customFormat: customInput.value }), 400);
+    });
+  }
+  const chatLive = document.getElementById('setting-chat-live');
+  if (chatLive) chatLive.addEventListener('change', () => saveSettings({ chatLiveEnabled: chatLive.checked }));
+  const chatVod = document.getElementById('setting-chat-vod');
+  if (chatVod) chatVod.addEventListener('change', () => saveSettings({ chatVodReplayEnabled: chatVod.checked }));
+});
+
+loadQualityAndSettings();
 
 // Initial load
 refreshLive();
