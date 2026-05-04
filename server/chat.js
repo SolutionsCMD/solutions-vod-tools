@@ -147,29 +147,123 @@ function startKickChat(channel, sessionDir, log, lastStatus) {
   let ws = null;
   let stopped = false;
   let reconnectTimer = null;
+  let resolveAttempts = 0;
+  let firstMessageLogged = false;
+  // Cap chatroom_id resolution attempts so we don't poll forever for a
+  // channel whose API is fully Cloudflare-blocked.
+  const MAX_RESOLVE_ATTEMPTS = 5;
 
-  // We need the chatroom_id from the channel info. Prefer the value already
-  // returned by checkKickLive(), fall back to fetching it ourselves.
+  // Headers that look more browser-y to dodge Cloudflare's basic bot
+  // heuristics. We'd be doing this in checkKickLive too, but that path
+  // already has its own header set; this is the chat-specific resolver.
+  const browserHeaders = {
+    'User-Agent': KICK_UA,
+    'Accept': 'application/json, text/plain, */*',
+    'Accept-Language': 'en-US,en;q=0.9',
+    'Accept-Encoding': 'gzip, deflate, br',
+    'Sec-Ch-Ua': '"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"',
+    'Sec-Ch-Ua-Mobile': '?0',
+    'Sec-Ch-Ua-Platform': '"Windows"',
+    'Sec-Fetch-Dest': 'empty',
+    'Sec-Fetch-Mode': 'cors',
+    'Sec-Fetch-Site': 'same-origin',
+    'Referer': `https://kick.com/${channel}`,
+  };
+
+  // We need the chatroom_id from the channel info. Try multiple sources in
+  // order, logging each step so future failures are debuggable. Without
+  // detailed logging "could not resolve chatroom_id" was a black box.
   async function resolveChatroomId() {
-    if (lastStatus && lastStatus.chatroomId) return lastStatus.chatroomId;
+    if (lastStatus && lastStatus.chatroomId) {
+      log(`[chat] kick: using chatroom_id ${lastStatus.chatroomId} from live-check`);
+      return lastStatus.chatroomId;
+    }
+
+    // 1) v2 channels API
     try {
       const res = await fetch(`https://kick.com/api/v2/channels/${encodeURIComponent(channel)}`, {
-        headers: { 'User-Agent': KICK_UA, 'Accept': 'application/json' },
+        headers: browserHeaders,
       });
-      if (!res.ok) return null;
-      const data = await res.json();
-      return data.chatroom?.id || data.id || null;
-    } catch (e) { return null; }
+      if (res.ok) {
+        const data = await res.json();
+        const id = data?.chatroom?.id || data?.chatroom_id || data?.id || null;
+        if (id) {
+          log(`[chat] kick: resolved chatroom_id ${id} via v2 API`);
+          return id;
+        }
+        log(`[chat] kick: v2 API 200 OK but no chatroom_id in payload (keys: ${Object.keys(data || {}).join(',')})`);
+      } else {
+        log(`[chat] kick: v2 API returned ${res.status} ${res.statusText}`);
+      }
+    } catch (e) {
+      log(`[chat] kick: v2 API fetch threw: ${e.message}`);
+    }
+
+    // 2) v1 channels API (sometimes less aggressively protected than v2)
+    try {
+      const res = await fetch(`https://kick.com/api/v1/channels/${encodeURIComponent(channel)}`, {
+        headers: browserHeaders,
+      });
+      if (res.ok) {
+        const data = await res.json();
+        const id = data?.chatroom?.id || data?.chatroom_id || data?.id || null;
+        if (id) {
+          log(`[chat] kick: resolved chatroom_id ${id} via v1 API`);
+          return id;
+        }
+        log(`[chat] kick: v1 API 200 OK but no chatroom_id (keys: ${Object.keys(data || {}).join(',')})`);
+      } else {
+        log(`[chat] kick: v1 API returned ${res.status}`);
+      }
+    } catch (e) {
+      log(`[chat] kick: v1 API fetch threw: ${e.message}`);
+    }
+
+    // 3) Channel page HTML — Kick embeds a __NEXT_DATA__ blob with channel
+    //    metadata including chatroom_id. Less Cloudflare-friction than the
+    //    JSON API endpoints.
+    try {
+      const res = await fetch(`https://kick.com/${encodeURIComponent(channel)}`, {
+        headers: { ...browserHeaders, 'Accept': 'text/html,application/xhtml+xml,*/*' },
+      });
+      if (res.ok) {
+        const html = await res.text();
+        // The structure can be `"chatroom":{...,"id":12345,...}` or
+        // `"chatroom_id":12345` depending on rendering. Match either.
+        const m = html.match(/"chatroom"\s*:\s*\{[^}]*?"id"\s*:\s*(\d+)/) ||
+                  html.match(/"chatroom_id"\s*:\s*(\d+)/);
+        if (m) {
+          const id = parseInt(m[1], 10);
+          log(`[chat] kick: resolved chatroom_id ${id} via channel page HTML`);
+          return id;
+        }
+        log(`[chat] kick: channel page HTML loaded (${html.length} bytes) but no chatroom_id pattern matched`);
+      } else {
+        log(`[chat] kick: channel page HTML returned ${res.status}`);
+      }
+    } catch (e) {
+      log(`[chat] kick: channel page HTML fetch threw: ${e.message}`);
+    }
+
+    return null;
   }
 
   async function connect() {
     if (stopped) return;
     const chatroomId = await resolveChatroomId();
     if (!chatroomId) {
-      log(`[chat] kick: could not resolve chatroom_id, retrying in 30s`);
+      resolveAttempts++;
+      if (resolveAttempts >= MAX_RESOLVE_ATTEMPTS) {
+        log(`[chat] kick: gave up resolving chatroom_id after ${resolveAttempts} attempts. Chat will not be captured for this recording.`);
+        return;
+      }
+      log(`[chat] kick: chatroom_id resolution failed (attempt ${resolveAttempts}/${MAX_RESOLVE_ATTEMPTS}), retrying in 30s`);
       reconnectTimer = setTimeout(connect, 30000);
       return;
     }
+    // Reset the counter once we successfully resolved — websocket failures
+    // shouldn't burn through the resolve budget.
+    resolveAttempts = 0;
 
     const url = `wss://ws-${KICK_PUSHER_CLUSTER}.pusher.com/app/${KICK_PUSHER_KEY}?protocol=7&client=js&version=8.4.0&flash=false`;
     try {
@@ -194,7 +288,12 @@ function startKickChat(channel, sessionDir, log, lastStatus) {
       let frame;
       try { frame = JSON.parse(text); } catch (e) { return; }
       // Pusher wraps messages: { event, channel, data: <stringified JSON> }
-      if (frame.event !== 'App\\Events\\ChatMessageEvent') return;
+      if (frame.event !== 'App\\Events\\ChatMessageEvent') {
+        // Log non-chat events once-each so we can see what Pusher is sending
+        // (subscription_succeeded, etc.) — useful for diagnosing why we
+        // might be subscribed but not receiving chat.
+        return;
+      }
       let payload;
       try { payload = typeof frame.data === 'string' ? JSON.parse(frame.data) : frame.data; }
       catch (e) { return; }
@@ -210,12 +309,16 @@ function startKickChat(channel, sessionDir, log, lastStatus) {
         entry.badges = badges.map(b => b.type).filter(Boolean);
       }
       appendChatLine(chatFile, entry);
+      if (!firstMessageLogged) {
+        firstMessageLogged = true;
+        log(`[chat] kick: first message received from ${entry.user} — chat is flowing`);
+      }
     });
 
     ws.on('error', (err) => log(`[chat] kick ws error: ${err.message}`));
-    ws.on('close', () => {
+    ws.on('close', (code, reason) => {
       if (stopped) return;
-      log(`[chat] kick ws closed, reconnecting in 5s`);
+      log(`[chat] kick ws closed (code=${code} reason=${reason || ''}), reconnecting in 5s`);
       reconnectTimer = setTimeout(connect, 5000);
     });
   }
