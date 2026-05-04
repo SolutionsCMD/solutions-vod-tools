@@ -137,7 +137,74 @@ function parseTwitchPrivmsg(line) {
 // ============================================================
 // Kick (Pusher WebSocket)
 // ============================================================
-function startKickChat(channel, sessionDir, log, lastStatus) {
+
+// yt-dlp's Kick extractor reaches the channels API server-side without the
+// Cloudflare 403 we get from a direct fetch. Asking it for `--dump-json` on
+// a Kick channel URL gets back a metadata blob whose shape varies by
+// yt-dlp version, so we scan recursively for any field that looks like a
+// chatroom id.
+function resolveChatroomIdViaYtdlp(ytdlpPath, channel, log) {
+  return new Promise((resolve) => {
+    const p = spawn(ytdlpPath, [
+      '--dump-json',
+      '--no-download',
+      '--no-warnings',
+      '--no-playlist',
+      `https://kick.com/${channel}`,
+    ], { windowsHide: true });
+    let out = '';
+    let err = '';
+    p.stdout.on('data', d => out += d.toString());
+    p.stderr.on('data', d => err += d.toString());
+    p.on('error', (e) => {
+      log(`[chat] kick: yt-dlp spawn failed: ${e.message}`);
+      resolve(null);
+    });
+    p.on('close', (code) => {
+      if (code !== 0 || !out.trim()) {
+        log(`[chat] kick: yt-dlp exited ${code} with no JSON (stderr: ${err.trim().slice(-200)})`);
+        resolve(null);
+        return;
+      }
+      let info;
+      try { info = JSON.parse(out.trim().split('\n')[0]); }
+      catch (e) {
+        log(`[chat] kick: yt-dlp JSON parse failed: ${e.message}`);
+        resolve(null);
+        return;
+      }
+      const id = findChatroomIdRecursive(info);
+      if (id) {
+        log(`[chat] kick: resolved chatroom_id ${id} via yt-dlp metadata`);
+        resolve(id);
+      } else {
+        // List the top-level keys so we can see what yt-dlp actually returns
+        // for Kick on the user's machine — useful if a future yt-dlp version
+        // adds chatroom info under a new field name.
+        log(`[chat] kick: yt-dlp metadata had no chatroom-shaped field (top-level keys: ${Object.keys(info).slice(0,30).join(',')})`);
+        resolve(null);
+      }
+    });
+  });
+}
+
+function findChatroomIdRecursive(obj, depth = 0) {
+  if (!obj || typeof obj !== 'object' || depth > 6) return null;
+  for (const [key, val] of Object.entries(obj)) {
+    if (val == null) continue;
+    if ((typeof val === 'number' || (typeof val === 'string' && /^\d+$/.test(val))) &&
+        /chat.?room.?id|chatroomid/i.test(key)) {
+      return typeof val === 'number' ? val : parseInt(val, 10);
+    }
+    if (typeof val === 'object') {
+      const found = findChatroomIdRecursive(val, depth + 1);
+      if (found) return found;
+    }
+  }
+  return null;
+}
+
+function startKickChat(channel, sessionDir, log, lastStatus, ytdlpPath) {
   if (!WebSocketLib) {
     log(`[chat] kick chat unavailable: 'ws' module not loaded`);
     return { stop: () => {} };
@@ -243,6 +310,56 @@ function startKickChat(channel, sessionDir, log, lastStatus) {
       }
     } catch (e) {
       log(`[chat] kick: channel page HTML fetch threw: ${e.message}`);
+    }
+
+    // 4) kicklet.app — third-party Kick analytics site. Their backend talks
+    //    to Kick from server-side IPs that aren't blocked, and they expose
+    //    channel data through their own pages/endpoints. Try a few common
+    //    URL shapes; whichever returns chatroom info wins.
+    const kickletUrls = [
+      `https://kicklet.app/${encodeURIComponent(channel)}`,
+      `https://kicklet.app/api/channel/${encodeURIComponent(channel)}`,
+      `https://kicklet.app/api/channels/${encodeURIComponent(channel)}`,
+      `https://kicklet.app/api/v1/channel/${encodeURIComponent(channel)}`,
+      `https://kicklet.app/api/streamer/${encodeURIComponent(channel)}`,
+    ];
+    for (const url of kickletUrls) {
+      try {
+        const res = await fetch(url, {
+          headers: { 'User-Agent': KICK_UA, 'Accept': 'application/json, text/html, */*' },
+        });
+        if (!res.ok) {
+          log(`[chat] kick: kicklet ${url} -> ${res.status}`);
+          continue;
+        }
+        const text = await res.text();
+        // Match across both JSON and HTML body shapes.
+        const m = text.match(/"chatroom_id"\s*:\s*(\d+)/) ||
+                  text.match(/"chatroom"\s*:\s*\{[^}]*?"id"\s*:\s*(\d+)/) ||
+                  text.match(/chatroomId["'\s:=]+(\d{5,})/i);
+        if (m) {
+          const id = parseInt(m[1], 10);
+          log(`[chat] kick: resolved chatroom_id ${id} via kicklet.app (${url})`);
+          return id;
+        }
+        log(`[chat] kick: kicklet ${url} 200 but no chatroom_id pattern (${text.length} bytes)`);
+      } catch (e) {
+        log(`[chat] kick: kicklet ${url} threw: ${e.message}`);
+      }
+    }
+
+    // 5) yt-dlp metadata — yt-dlp's Kick extractor clearly bypasses
+    //    Cloudflare (recordings work). Ask it for channel metadata via
+    //    --dump-json and scan for any chatroom-id-shaped field.
+    if (ytdlpPath) {
+      try {
+        const id = await resolveChatroomIdViaYtdlp(ytdlpPath, channel, log);
+        if (id) return id;
+      } catch (e) {
+        log(`[chat] kick: yt-dlp resolve threw: ${e.message}`);
+      }
+    } else {
+      log(`[chat] kick: ytdlpPath not provided, skipping yt-dlp fallback`);
     }
 
     return null;
@@ -467,7 +584,7 @@ function startChatCapture({ platform, channel, sessionDir, lastStatus, streamUrl
 
   switch (platform) {
     case 'twitch':  return startTwitchChat(channel, sessionDir, safeLog);
-    case 'kick':    return startKickChat(channel, sessionDir, safeLog, lastStatus);
+    case 'kick':    return startKickChat(channel, sessionDir, safeLog, lastStatus, ytdlpPath);
     case 'youtube': return startYoutubeChat(streamUrl, sessionDir, safeLog, ytdlpPath);
     default:
       safeLog(`[chat] no chat capture for platform '${platform}'`);
