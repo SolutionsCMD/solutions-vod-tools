@@ -114,9 +114,14 @@ app.post('/api/download', async (req, res) => {
   // Only Twitch + YouTube have documented VOD chat we can pull.
   const captureChat = wantChat && (urlPlatform === 'twitch' || urlPlatform === 'youtube');
 
+  // We omit `--hls-prefer-native` when a section is requested. The native HLS
+  // downloader can't seek to a section — it'd write info.json then silently
+  // never start the actual transfer (that was the symptom in 1.2.0 reports).
+  // Letting yt-dlp pick its default (ffmpeg-based) HLS downloader handles
+  // sections fine. For full-VOD downloads we keep the native downloader since
+  // it's faster and more reliable for unseeked HLS.
   const ytArgs = [
     '-f', formatStr,
-    '--hls-prefer-native',
     '-N', '16',
     '--merge-output-format', 'mp4',
     '--write-info-json',
@@ -125,6 +130,9 @@ app.post('/api/download', async (req, res) => {
     '--download-archive', path.join(targetDir, 'archive.txt'),
     '-P', targetDir,
   ];
+  if (!hasSection) {
+    ytArgs.push('--hls-prefer-native');
+  }
 
   if (captureChat) {
     if (urlPlatform === 'twitch') {

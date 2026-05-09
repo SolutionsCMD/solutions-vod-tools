@@ -462,34 +462,6 @@ function syncInputsFromSliders() {
   document.getElementById('start').value = a > 0 ? secondsToHms(a) : '';
   document.getElementById('end').value = b < trimState.durationSec ? secondsToHms(b) : '';
   updateTrimFillFromSliders();
-  setActiveTrimChip(null); // any manual drag → clear chip selection
-}
-
-function applyTrimChip(kind) {
-  if (trimState.durationSec <= 0 && kind !== 'full') return;
-  const dur = trimState.durationSec;
-  let a = 0, b = dur;
-  switch (kind) {
-    case 'full':           a = 0; b = dur; break;
-    case 'first-5m':       a = 0; b = Math.min(5 * 60, dur); break;
-    case 'first-30m':      a = 0; b = Math.min(30 * 60, dur); break;
-    case 'first-hour':     a = 0; b = Math.min(60 * 60, dur); break;
-    case 'last-5m':        a = Math.max(0, dur - 5 * 60); b = dur; break;
-    case 'last-30m':       a = Math.max(0, dur - 30 * 60); b = dur; break;
-    case 'last-hour':      a = Math.max(0, dur - 60 * 60); b = dur; break;
-    case 'skip-first-30m': a = Math.min(30 * 60, dur); b = dur; break;
-    default: return;
-  }
-  document.getElementById('start').value = a > 0 ? secondsToHms(a) : '';
-  document.getElementById('end').value = (b > 0 && b < dur) ? secondsToHms(b) : (kind === 'full' ? '' : secondsToHms(b));
-  syncSlidersFromInputs();
-  setActiveTrimChip(kind);
-}
-
-function setActiveTrimChip(kind) {
-  document.querySelectorAll('.trim-chip').forEach(c => {
-    c.classList.toggle('active', c.dataset.trim === kind);
-  });
 }
 
 // Probe the URL via the server (yt-dlp --dump-json). Debounced — we don't
@@ -565,7 +537,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
   const startInput = document.getElementById('start');
   const endInput = document.getElementById('end');
-  const onTimeBlur = () => { syncSlidersFromInputs(); setActiveTrimChip(null); };
+  const onTimeBlur = () => { syncSlidersFromInputs(); };
   if (startInput) startInput.addEventListener('blur', onTimeBlur);
   if (endInput) endInput.addEventListener('blur', onTimeBlur);
 
@@ -573,10 +545,6 @@ document.addEventListener('DOMContentLoaded', () => {
   const endSlider = document.getElementById('trim-end-slider');
   if (startSlider) startSlider.addEventListener('input', syncInputsFromSliders);
   if (endSlider)   endSlider.addEventListener('input', syncInputsFromSliders);
-
-  document.querySelectorAll('.trim-chip').forEach(chip => {
-    chip.addEventListener('click', () => applyTrimChip(chip.dataset.trim));
-  });
 
   setTrimSliderEnabled(false);
 });
@@ -998,18 +966,6 @@ document.getElementById('cut-end').addEventListener('input', (e) => {
   schedulePreview('end', 500);
 });
 
-// Step buttons (-5m / -1m / -10s / -1s / +1s / +10s / +1m / +5m)
-document.addEventListener('click', (e) => {
-  const btn = e.target.closest('.step-btn');
-  if (!btn) return;
-  const which = btn.dataset.adjust;
-  const delta = parseInt(btn.dataset.delta, 10);
-  if (!which || isNaN(delta)) return;
-  const slider = document.getElementById('cut-' + which + '-slider');
-  const current = parseInt(slider.value, 10) || 0;
-  setTime(which, current + delta, 'button');
-  updatePreview(which); // immediate for button clicks
-});
 
 document.getElementById('btn-auto-stitch').addEventListener('click', async () => {
   const btn = document.getElementById('btn-auto-stitch');
@@ -1617,7 +1573,9 @@ async function loadQualityAndSettings() {
     ]);
     qualityState.presets = presetsRes.presets || [];
     qualityState.appSettings = settingsRes;
-    qualityState.downloadPreset = settingsRes.qualityDefault || 'source';
+    // Download tab always defaults to 'source' regardless of the global default
+    // (which controls live recording). Source = highest available, no compromises.
+    qualityState.downloadPreset = 'source';
     renderAllQualityUI();
   } catch (err) {
     console.error('[quality] failed to load presets/settings:', err);

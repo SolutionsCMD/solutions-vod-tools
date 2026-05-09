@@ -1045,34 +1045,8 @@ input[type="range"]:focus::-webkit-slider-thumb { box-shadow: var(--shadow-glow)
 }
 
 /* ============================================================
-   DOWNLOAD — trim chips + dual-handle slider
+   DOWNLOAD — dual-handle trim slider
    ============================================================ */
-.trim-chips {
-  display: flex; gap: 6px; flex-wrap: wrap;
-  margin-bottom: 12px;
-}
-.trim-chip {
-  background: var(--bg-input);
-  border: 1px solid var(--border);
-  border-radius: 999px;
-  color: var(--text-secondary);
-  padding: 6px 12px;
-  font-family: inherit;
-  font-size: var(--fs-sm);
-  cursor: pointer;
-  transition: background var(--t-fast), color var(--t-fast), border-color var(--t-fast);
-}
-.trim-chip:hover { background: var(--bg-hover); color: var(--text-primary); }
-.trim-chip.active {
-  background: var(--accent-bg, var(--bg-hover));
-  color: var(--accent);
-  border-color: var(--accent);
-}
-.trim-chip:disabled {
-  opacity: 0.4;
-  cursor: not-allowed;
-}
-
 .trim-slider-wrap {
   display: flex; flex-direction: column; gap: 12px;
 }
