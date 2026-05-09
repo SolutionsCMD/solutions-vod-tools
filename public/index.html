@@ -493,7 +493,24 @@
 
         <div class="card">
           <div class="card-header">
-            <h2 class="card-title">Browser cookies</h2>
+            <h2 class="card-title">YouTube sign-in</h2>
+          </div>
+          <div class="hint" style="margin-bottom: 12px;">
+            Sign in once and the app saves your YouTube cookies. yt-dlp uses
+            them automatically for age-gated, members-only, and login-walled
+            videos. Recommended over the browser-cookies fallback below — it
+            doesn't depend on Chrome/Edge encryption keys.
+          </div>
+          <div style="display: flex; align-items: center; gap: 10px; flex-wrap: wrap;">
+            <button class="btn btn-primary" id="btn-yt-signin">Sign in to YouTube</button>
+            <button class="btn btn-danger" id="btn-yt-signout" style="display: none;">Clear sign-in</button>
+            <span class="status-pill" id="yt-signin-status">checking…</span>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-header">
+            <h2 class="card-title">Browser cookies <span style="color: var(--text-tertiary); font-weight: normal; font-size: var(--fs-sm);">(fallback)</span></h2>
           </div>
           <div class="field">
             <label class="label" for="setting-cookies-browser">Use cookies from</label>
@@ -506,7 +523,7 @@
               <option value="opera">Opera</option>
               <option value="vivaldi">Vivaldi</option>
             </select>
-            <div class="hint">Lets yt-dlp pull age-gated / members-only / login-walled videos. <strong>Caveat:</strong> Chrome and Edge lock their cookie databases while open — yt-dlp will fail with a permission error. Close the browser before downloading, or use <strong>Firefox</strong> as your cookie source (its DB stays readable while running).</div>
+            <div class="hint">Only used when the YouTube sign-in above is empty. <strong>Caveat:</strong> Chrome and Edge use DPAPI / app-bound encryption that yt-dlp often can't decrypt — if you see "Failed to decrypt with DPAPI", use the YouTube sign-in instead, or pick Firefox here.</div>
           </div>
         </div>
 

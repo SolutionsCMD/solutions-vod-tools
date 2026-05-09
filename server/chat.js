@@ -518,7 +518,7 @@ function startKickChat(channel, sessionDir, log, lastStatus, ytdlpPath) {
 // ============================================================
 // yt-dlp writes a .live_chat.json file with one action object per line. On
 // stop we normalize it into chat.jsonl (unified format).
-function startYoutubeChat(streamUrl, sessionDir, log, ytdlpPath, cookiesFromBrowser) {
+function startYoutubeChat(streamUrl, sessionDir, log, ytdlpPath, cookiesFile, cookiesFromBrowser) {
   const rawTemplate = path.join(sessionDir, 'yt-chat');
   const chatFile = path.join(sessionDir, 'chat.jsonl');
   // yt-dlp writes <template>.<lang>.<ext> — for live_chat that's:
@@ -533,7 +533,10 @@ function startYoutubeChat(streamUrl, sessionDir, log, ytdlpPath, cookiesFromBrow
     '-o', rawTemplate,
   ];
   // Cookies for age-gated / members-only / login-walled YouTube live streams.
-  if (cookiesFromBrowser) {
+  // cookies.txt (from in-app sign-in) wins over the browser dropdown.
+  if (cookiesFile) {
+    args.push('--cookies', cookiesFile);
+  } else if (cookiesFromBrowser) {
     args.push('--cookies-from-browser', cookiesFromBrowser);
   }
   args.push(streamUrl);
@@ -628,7 +631,7 @@ function extractYoutubeChatEntries(obj) {
 // ============================================================
 // Public API
 // ============================================================
-function startChatCapture({ platform, channel, sessionDir, lastStatus, streamUrl, ytdlpPath, cookiesFromBrowser }, log) {
+function startChatCapture({ platform, channel, sessionDir, lastStatus, streamUrl, ytdlpPath, cookiesFile, cookiesFromBrowser }, log) {
   // Write a per-session chat.log file alongside chat.jsonl so failures are
   // visible after the fact. Without this, chat capture errors only existed
   // in the in-memory watcher logTail, which vanishes the moment the app
@@ -651,7 +654,7 @@ function startChatCapture({ platform, channel, sessionDir, lastStatus, streamUrl
   switch (platform) {
     case 'twitch':  return startTwitchChat(channel, sessionDir, safeLog);
     case 'kick':    return startKickChat(channel, sessionDir, safeLog, lastStatus, ytdlpPath);
-    case 'youtube': return startYoutubeChat(streamUrl, sessionDir, safeLog, ytdlpPath, cookiesFromBrowser);
+    case 'youtube': return startYoutubeChat(streamUrl, sessionDir, safeLog, ytdlpPath, cookiesFile, cookiesFromBrowser);
     default:
       safeLog(`[chat] no chat capture for platform '${platform}'`);
       return { stop: () => {} };

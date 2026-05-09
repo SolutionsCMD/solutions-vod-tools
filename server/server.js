@@ -24,6 +24,10 @@ function createServer(options = {}) {
   const DEFAULT_OUTPUT = options.outputDir || path.join(__dirname, 'vods');
   const BIN_DIR = options.binDir || path.join(__dirname, 'bin');
   const PUBLIC_DIR = options.publicDir || path.join(__dirname, '..', 'public');
+  // Path where the in-app YouTube sign-in writes a Netscape cookies.txt.
+  // When this file exists, yt-dlp gets `--cookies <path>` and the browser
+  // dropdown is bypassed (cookies file is a stronger signal of user intent).
+  const COOKIES_FILE = options.cookiesFile || null;
 
   if (!fs.existsSync(DEFAULT_OUTPUT)) fs.mkdirSync(DEFAULT_OUTPUT, { recursive: true });
   if (!fs.existsSync(BIN_DIR)) fs.mkdirSync(BIN_DIR, { recursive: true });
@@ -144,14 +148,23 @@ app.post('/api/download', async (req, res) => {
     writeLine(res, `[info] Section: ${startStr} to ${endStr} (partial download)`);
   }
 
-  // Browser cookies for age-gated / login-walled content. Per-job override
-  // beats global setting; empty string means "don't pass cookies."
-  const cookieBrowser = (typeof cookiesFromBrowser === 'string'
-    ? cookiesFromBrowser
-    : settings.get().cookiesFromBrowser || '').toLowerCase();
-  if (cookieBrowser) {
-    ytArgs.push('--cookies-from-browser', cookieBrowser);
-    writeLine(res, `[info] Cookies: from ${cookieBrowser}`);
+  // Cookies for age-gated / login-walled content. Precedence:
+  //   1. cookies.txt written by the in-app YouTube sign-in (most reliable —
+  //      no DPAPI dance, no browser-locked DBs).
+  //   2. --cookies-from-browser <browser> from the per-job dropdown or the
+  //      global setting (works for Firefox; flaky for Chrome/Edge).
+  //   3. Nothing.
+  if (COOKIES_FILE && fs.existsSync(COOKIES_FILE)) {
+    ytArgs.push('--cookies', COOKIES_FILE);
+    writeLine(res, `[info] Cookies: signed-in YouTube session`);
+  } else {
+    const cookieBrowser = (typeof cookiesFromBrowser === 'string'
+      ? cookiesFromBrowser
+      : settings.get().cookiesFromBrowser || '').toLowerCase();
+    if (cookieBrowser) {
+      ytArgs.push('--cookies-from-browser', cookieBrowser);
+      writeLine(res, `[info] Cookies: from ${cookieBrowser}`);
+    }
   }
 
   ytArgs.push(url);
@@ -549,12 +562,16 @@ function startRecording(key) {
     '--no-part',
     '-o', outputPath,
   ];
-  // Cookies for age-gated / login-walled live content (e.g. some YouTube
-  // members-only streams). Inserted before the URL so yt-dlp processes them
-  // during the initial info extraction.
-  const cookieBrowser = (settings.get().cookiesFromBrowser || '').toLowerCase();
-  if (cookieBrowser) {
-    args.push('--cookies-from-browser', cookieBrowser);
+  // Cookies for age-gated / members-only / login-walled live content. Same
+  // precedence as the download path: signed-in cookies.txt > browser dropdown
+  // > nothing.
+  if (COOKIES_FILE && fs.existsSync(COOKIES_FILE)) {
+    args.push('--cookies', COOKIES_FILE);
+  } else {
+    const cookieBrowser = (settings.get().cookiesFromBrowser || '').toLowerCase();
+    if (cookieBrowser) {
+      args.push('--cookies-from-browser', cookieBrowser);
+    }
   }
   args.push(platform.streamUrl(watcher.channel));
 
@@ -580,6 +597,7 @@ function startRecording(key) {
         lastStatus: watcher.lastStatus,
         streamUrl: platform.streamUrl(watcher.channel),
         ytdlpPath: YTDLP,
+        cookiesFile: (COOKIES_FILE && fs.existsSync(COOKIES_FILE)) ? COOKIES_FILE : null,
         cookiesFromBrowser: (settings.get().cookiesFromBrowser || '').toLowerCase(),
       }, (msg) => {
         // Pipe chat log lines into the watcher's logTail so they show in the UI.

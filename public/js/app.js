@@ -1274,6 +1274,44 @@ function renderCookiesSelectors() {
   if (dlSel) dlSel.value = value;
 }
 
+// ---------- YouTube sign-in (cookies.txt) ----------
+async function refreshYtSigninStatus() {
+  const pill = document.getElementById('yt-signin-status');
+  const signOutBtn = document.getElementById('btn-yt-signout');
+  const signInBtn = document.getElementById('btn-yt-signin');
+  if (!pill || !signOutBtn || !signInBtn) return;
+  if (!window.electron || !window.electron.cookiesStatus) {
+    pill.textContent = 'unavailable';
+    return;
+  }
+  try {
+    const status = await window.electron.cookiesStatus();
+    if (status && status.exists) {
+      const ago = friendlyAgo(status.savedAtMs);
+      pill.textContent = `signed in (${ago})`;
+      pill.style.color = 'var(--accent)';
+      signOutBtn.style.display = '';
+      signInBtn.textContent = 'Sign in again';
+    } else {
+      pill.textContent = 'not signed in';
+      pill.style.color = '';
+      signOutBtn.style.display = 'none';
+      signInBtn.textContent = 'Sign in to YouTube';
+    }
+  } catch (err) {
+    pill.textContent = 'error';
+    console.error('[yt-signin] status check failed', err);
+  }
+}
+
+function friendlyAgo(ms) {
+  const sec = Math.max(0, (Date.now() - ms) / 1000);
+  if (sec < 60) return 'just now';
+  if (sec < 3600) return `${Math.floor(sec / 60)}m ago`;
+  if (sec < 86400) return `${Math.floor(sec / 3600)}h ago`;
+  return `${Math.floor(sec / 86400)}d ago`;
+}
+
 function renderAllQualityUI() {
   renderDownloadChips();
   updateDownloadHint();
@@ -1342,6 +1380,46 @@ document.addEventListener('DOMContentLoaded', () => {
       renderCookiesSelectors();
     });
   }
+
+  const ytSignInBtn = document.getElementById('btn-yt-signin');
+  if (ytSignInBtn && window.electron && window.electron.cookiesSignIn) {
+    ytSignInBtn.addEventListener('click', async () => {
+      ytSignInBtn.disabled = true;
+      const prevText = ytSignInBtn.textContent;
+      ytSignInBtn.textContent = 'Sign-in window open…';
+      try {
+        const result = await window.electron.cookiesSignIn();
+        if (result && result.ok && result.count > 0) {
+          // Status pill will update on next refresh.
+        } else if (result && result.ok && result.count === 0) {
+          alert('No YouTube cookies found. Make sure you actually signed in before closing the window.');
+        } else if (result && !result.ok) {
+          alert('Sign-in failed: ' + (result.error || 'unknown'));
+        }
+      } catch (err) {
+        alert('Sign-in error: ' + err.message);
+      } finally {
+        ytSignInBtn.disabled = false;
+        ytSignInBtn.textContent = prevText;
+        refreshYtSigninStatus();
+      }
+    });
+  }
+
+  const ytSignOutBtn = document.getElementById('btn-yt-signout');
+  if (ytSignOutBtn && window.electron && window.electron.cookiesClear) {
+    ytSignOutBtn.addEventListener('click', async () => {
+      if (!confirm('Clear the saved YouTube sign-in? You will need to sign in again to download age-gated content.')) return;
+      try {
+        await window.electron.cookiesClear();
+      } catch (err) {
+        alert('Clear failed: ' + err.message);
+      }
+      refreshYtSigninStatus();
+    });
+  }
+
+  refreshYtSigninStatus();
 });
 
 loadQualityAndSettings();
