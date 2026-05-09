@@ -493,18 +493,29 @@
 
         <div class="card">
           <div class="card-header">
-            <h2 class="card-title">YouTube sign-in</h2>
+            <h2 class="card-title">YouTube cookies (import)</h2>
           </div>
           <div class="hint" style="margin-bottom: 12px;">
-            Sign in once and the app saves your YouTube cookies. yt-dlp uses
-            them automatically for age-gated, members-only, and login-walled
-            videos. Recommended over the browser-cookies fallback below — it
-            doesn't depend on Chrome/Edge encryption keys.
+            For age-gated, members-only, or login-walled YouTube content. Export
+            a <code>cookies.txt</code> from your real browser and import it here —
+            yt-dlp will use it automatically. Recommended over the browser-cookies
+            dropdown below (which fails on recent Chrome/Edge with a DPAPI error).
+            <br><br>
+            <strong>How to export:</strong>
+            <ol style="margin: 6px 0 0 18px; padding: 0;">
+              <li>Install the free
+                <a href="#" data-extlink="https://chromewebstore.google.com/detail/get-cookiestxt-locally/cclelndahbckbenkjhflpdbgdldlbecc">Get cookies.txt LOCALLY</a>
+                extension (Chrome / Edge / Brave) or
+                <a href="#" data-extlink="https://addons.mozilla.org/en-US/firefox/addon/cookies-txt/">cookies.txt</a> (Firefox).</li>
+              <li>Sign in to YouTube in that browser. (For age-gated content, watch the video once to confirm the gate accepts your account.)</li>
+              <li>While on a youtube.com tab, click the extension icon → <em>Export</em>. Save the <code>.txt</code> file anywhere.</li>
+              <li>Click <strong>Import cookies.txt</strong> below and pick the file you just saved.</li>
+            </ol>
           </div>
           <div style="display: flex; align-items: center; gap: 10px; flex-wrap: wrap;">
-            <button class="btn btn-primary" id="btn-yt-signin">Sign in to YouTube</button>
-            <button class="btn btn-danger" id="btn-yt-signout" style="display: none;">Clear sign-in</button>
-            <span class="status-pill" id="yt-signin-status">checking…</span>
+            <button class="btn btn-primary" id="btn-cookies-import">Import cookies.txt</button>
+            <button class="btn btn-danger" id="btn-cookies-clear" style="display: none;">Clear cookies</button>
+            <span class="status-pill" id="cookies-status">checking…</span>
           </div>
         </div>
 

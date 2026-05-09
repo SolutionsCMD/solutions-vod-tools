@@ -1274,12 +1274,12 @@ function renderCookiesSelectors() {
   if (dlSel) dlSel.value = value;
 }
 
-// ---------- YouTube sign-in (cookies.txt) ----------
-async function refreshYtSigninStatus() {
-  const pill = document.getElementById('yt-signin-status');
-  const signOutBtn = document.getElementById('btn-yt-signout');
-  const signInBtn = document.getElementById('btn-yt-signin');
-  if (!pill || !signOutBtn || !signInBtn) return;
+// ---------- Cookies.txt import ----------
+async function refreshCookiesStatus() {
+  const pill = document.getElementById('cookies-status');
+  const clearBtn = document.getElementById('btn-cookies-clear');
+  const importBtn = document.getElementById('btn-cookies-import');
+  if (!pill || !clearBtn || !importBtn) return;
   if (!window.electron || !window.electron.cookiesStatus) {
     pill.textContent = 'unavailable';
     return;
@@ -1288,19 +1288,19 @@ async function refreshYtSigninStatus() {
     const status = await window.electron.cookiesStatus();
     if (status && status.exists) {
       const ago = friendlyAgo(status.savedAtMs);
-      pill.textContent = `signed in (${ago})`;
+      pill.textContent = `imported (${ago})`;
       pill.style.color = 'var(--accent)';
-      signOutBtn.style.display = '';
-      signInBtn.textContent = 'Sign in again';
+      clearBtn.style.display = '';
+      importBtn.textContent = 'Re-import cookies.txt';
     } else {
-      pill.textContent = 'not signed in';
+      pill.textContent = 'no cookies imported';
       pill.style.color = '';
-      signOutBtn.style.display = 'none';
-      signInBtn.textContent = 'Sign in to YouTube';
+      clearBtn.style.display = 'none';
+      importBtn.textContent = 'Import cookies.txt';
     }
   } catch (err) {
     pill.textContent = 'error';
-    console.error('[yt-signin] status check failed', err);
+    console.error('[cookies] status check failed', err);
   }
 }
 
@@ -1381,45 +1381,54 @@ document.addEventListener('DOMContentLoaded', () => {
     });
   }
 
-  const ytSignInBtn = document.getElementById('btn-yt-signin');
-  if (ytSignInBtn && window.electron && window.electron.cookiesSignIn) {
-    ytSignInBtn.addEventListener('click', async () => {
-      ytSignInBtn.disabled = true;
-      const prevText = ytSignInBtn.textContent;
-      ytSignInBtn.textContent = 'Sign-in window open…';
+  const importBtn = document.getElementById('btn-cookies-import');
+  if (importBtn && window.electron && window.electron.cookiesImport) {
+    importBtn.addEventListener('click', async () => {
+      importBtn.disabled = true;
       try {
-        const result = await window.electron.cookiesSignIn();
-        if (result && result.ok && result.count > 0) {
-          // Status pill will update on next refresh.
-        } else if (result && result.ok && result.count === 0) {
-          alert('No YouTube cookies found. Make sure you actually signed in before closing the window.');
+        const result = await window.electron.cookiesImport();
+        if (result && result.ok) {
+          alert(`Imported ${result.count || 0} cookies. yt-dlp will use them on the next download.`);
+        } else if (result && result.canceled) {
+          // User canceled the file picker — say nothing.
         } else if (result && !result.ok) {
-          alert('Sign-in failed: ' + (result.error || 'unknown'));
+          alert('Import failed: ' + (result.error || 'unknown'));
         }
       } catch (err) {
-        alert('Sign-in error: ' + err.message);
+        alert('Import error: ' + err.message);
       } finally {
-        ytSignInBtn.disabled = false;
-        ytSignInBtn.textContent = prevText;
-        refreshYtSigninStatus();
+        importBtn.disabled = false;
+        refreshCookiesStatus();
       }
     });
   }
 
-  const ytSignOutBtn = document.getElementById('btn-yt-signout');
-  if (ytSignOutBtn && window.electron && window.electron.cookiesClear) {
-    ytSignOutBtn.addEventListener('click', async () => {
-      if (!confirm('Clear the saved YouTube sign-in? You will need to sign in again to download age-gated content.')) return;
+  const clearCookiesBtn = document.getElementById('btn-cookies-clear');
+  if (clearCookiesBtn && window.electron && window.electron.cookiesClear) {
+    clearCookiesBtn.addEventListener('click', async () => {
+      if (!confirm('Clear the imported cookies? yt-dlp will fall back to no cookies (or your browser-cookies dropdown if set).')) return;
       try {
         await window.electron.cookiesClear();
       } catch (err) {
         alert('Clear failed: ' + err.message);
       }
-      refreshYtSigninStatus();
+      refreshCookiesStatus();
     });
   }
 
-  refreshYtSigninStatus();
+  // Open the "where to get the extension" links in the user's real browser
+  // (clicking inside Electron's main window would just navigate the app away).
+  document.querySelectorAll('a[data-extlink]').forEach(a => {
+    a.addEventListener('click', (e) => {
+      e.preventDefault();
+      const url = a.getAttribute('data-extlink');
+      if (url && window.electron && window.electron.openExternal) {
+        window.electron.openExternal(url);
+      }
+    });
+  });
+
+  refreshCookiesStatus();
 });
 
 loadQualityAndSettings();

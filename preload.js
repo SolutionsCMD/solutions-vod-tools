@@ -18,8 +18,8 @@ contextBridge.exposeInMainWorld('electron', {
   openExternal:          (url) => ipcRenderer.send('open:external', url),
   checkForUpdates:       () => ipcRenderer.invoke('updates:check'),
 
-  // YouTube sign-in (writes cookies.txt for yt-dlp's --cookies flag)
-  cookiesSignIn:         () => ipcRenderer.invoke('cookies:signin'),
+  // Import a Netscape cookies.txt for yt-dlp's --cookies flag
+  cookiesImport:         () => ipcRenderer.invoke('cookies:import'),
   cookiesStatus:         () => ipcRenderer.invoke('cookies:status'),
   cookiesClear:          () => ipcRenderer.invoke('cookies:clear'),
 });
