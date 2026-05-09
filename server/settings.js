@@ -22,7 +22,16 @@ const DEFAULTS = {
   // Chat
   chatLiveEnabled: true,                     // capture chat during live recordings
   chatVodReplayEnabled: true,                // pull chat replay when downloading VODs (Twitch/YouTube)
+
+  // Auth
+  // Browser whose cookie database yt-dlp should use for age-gated / login-walled
+  // content. Empty string means "don't pass cookies." Chrome/Edge lock their
+  // cookie DB while running — Firefox is the practical choice if you don't
+  // want to close the browser before each download.
+  cookiesFromBrowser: '',                    // '' | 'chrome' | 'firefox' | 'edge' | 'brave' | 'opera' | 'vivaldi'
 };
+
+const COOKIE_BROWSERS = new Set(['', 'chrome', 'firefox', 'edge', 'brave', 'opera', 'vivaldi']);
 
 function makeStore(filePath) {
   let state = { ...DEFAULTS };
@@ -86,6 +95,10 @@ function makeStore(filePath) {
     }
     if (typeof patch.chatVodReplayEnabled === 'boolean') {
       state.chatVodReplayEnabled = patch.chatVodReplayEnabled;
+    }
+    if (typeof patch.cookiesFromBrowser === 'string') {
+      const v = patch.cookiesFromBrowser.toLowerCase();
+      if (COOKIE_BROWSERS.has(v)) state.cookiesFromBrowser = v;
     }
     save();
     return state;

@@ -71,7 +71,7 @@ function streamProcess(proc, res, label) {
 
 // -------- Download (with optional section) --------
 app.post('/api/download', async (req, res) => {
-  const { url, startTime, endTime, outputDir, qualityPreset, customFormat, includeChatReplay } = req.body;
+  const { url, startTime, endTime, outputDir, qualityPreset, customFormat, includeChatReplay, cookiesFromBrowser } = req.body;
 
   if (!url) {
     res.status(400).json({ error: 'URL required' });
@@ -142,6 +142,16 @@ app.post('/api/download', async (req, res) => {
     const endStr = end || 'inf';
     ytArgs.push('--download-sections', `*${startStr}-${endStr}`);
     writeLine(res, `[info] Section: ${startStr} to ${endStr} (partial download)`);
+  }
+
+  // Browser cookies for age-gated / login-walled content. Per-job override
+  // beats global setting; empty string means "don't pass cookies."
+  const cookieBrowser = (typeof cookiesFromBrowser === 'string'
+    ? cookiesFromBrowser
+    : settings.get().cookiesFromBrowser || '').toLowerCase();
+  if (cookieBrowser) {
+    ytArgs.push('--cookies-from-browser', cookieBrowser);
+    writeLine(res, `[info] Cookies: from ${cookieBrowser}`);
   }
 
   ytArgs.push(url);
@@ -538,8 +548,15 @@ function startRecording(key) {
     '--retry-sleep', 'fragment:5',
     '--no-part',
     '-o', outputPath,
-    platform.streamUrl(watcher.channel),
   ];
+  // Cookies for age-gated / login-walled live content (e.g. some YouTube
+  // members-only streams). Inserted before the URL so yt-dlp processes them
+  // during the initial info extraction.
+  const cookieBrowser = (settings.get().cookiesFromBrowser || '').toLowerCase();
+  if (cookieBrowser) {
+    args.push('--cookies-from-browser', cookieBrowser);
+  }
+  args.push(platform.streamUrl(watcher.channel));
 
   console.log(`[live] Starting recording for ${key} (quality=${presetId}) -> ${outputPath}`);
   const proc = spawn(YTDLP, args, { windowsHide: true });
@@ -563,6 +580,7 @@ function startRecording(key) {
         lastStatus: watcher.lastStatus,
         streamUrl: platform.streamUrl(watcher.channel),
         ytdlpPath: YTDLP,
+        cookiesFromBrowser: (settings.get().cookiesFromBrowser || '').toLowerCase(),
       }, (msg) => {
         // Pipe chat log lines into the watcher's logTail so they show in the UI.
         watcher.logTail.push(msg);

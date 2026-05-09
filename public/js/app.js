@@ -366,6 +366,7 @@ document.getElementById('btn-start-download').addEventListener('click', () => {
     qualityPreset: qualityState.downloadPreset,
     customFormat: qualityState.appSettings && qualityState.appSettings.customFormat,
     includeChatReplay: document.getElementById('dl-include-chat').checked,
+    cookiesFromBrowser: (document.getElementById('dl-cookies-browser') || {}).value || '',
   });
 });
 
@@ -1263,6 +1264,16 @@ function renderChatToggles() {
   if (dlChat) dlChat.checked = !!settings.chatVodReplayEnabled;
 }
 
+function renderCookiesSelectors() {
+  const settings = qualityState.appSettings || {};
+  const value = (settings.cookiesFromBrowser || '').toLowerCase();
+  const settingSel = document.getElementById('setting-cookies-browser');
+  if (settingSel) settingSel.value = value;
+  // Mirror to the per-job download dropdown so it defaults to the saved value.
+  const dlSel = document.getElementById('dl-cookies-browser');
+  if (dlSel) dlSel.value = value;
+}
+
 function renderAllQualityUI() {
   renderDownloadChips();
   updateDownloadHint();
@@ -1271,6 +1282,7 @@ function renderAllQualityUI() {
   renderPerPlatformOverrides();
   renderAdvancedQualityToggle();
   renderChatToggles();
+  renderCookiesSelectors();
 }
 
 async function saveSettings(patch) {
@@ -1322,6 +1334,14 @@ document.addEventListener('DOMContentLoaded', () => {
   if (chatLive) chatLive.addEventListener('change', () => saveSettings({ chatLiveEnabled: chatLive.checked }));
   const chatVod = document.getElementById('setting-chat-vod');
   if (chatVod) chatVod.addEventListener('change', () => saveSettings({ chatVodReplayEnabled: chatVod.checked }));
+  const cookiesSel = document.getElementById('setting-cookies-browser');
+  if (cookiesSel) {
+    cookiesSel.addEventListener('change', async () => {
+      await saveSettings({ cookiesFromBrowser: cookiesSel.value });
+      // Re-mirror to the download form so the per-job dropdown follows the new default.
+      renderCookiesSelectors();
+    });
+  }
 });
 
 loadQualityAndSettings();

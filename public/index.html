@@ -163,6 +163,20 @@
             Include chat replay (Twitch + YouTube only)
           </label>
 
+          <div class="field" style="margin-top: 12px;">
+            <label class="label" for="dl-cookies-browser">Browser cookies <span style="color: var(--text-tertiary); font-weight: normal;">(for age-gated / login-walled videos)</span></label>
+            <select id="dl-cookies-browser">
+              <option value="">None</option>
+              <option value="chrome">Chrome</option>
+              <option value="firefox">Firefox</option>
+              <option value="edge">Edge</option>
+              <option value="brave">Brave</option>
+              <option value="opera">Opera</option>
+              <option value="vivaldi">Vivaldi</option>
+            </select>
+            <div class="hint">Default comes from Settings. Chrome/Edge lock their cookie DB while running — close the browser first, or use Firefox.</div>
+          </div>
+
           <div class="btn-row" style="margin-top: 18px;">
             <button class="btn btn-primary" id="btn-start-download">Start</button>
             <button class="btn btn-danger" id="btn-cancel-download" disabled>Cancel</button>
@@ -475,6 +489,25 @@
               <div class="hint" style="margin: 0;">Twitch + YouTube only. Adds noticeable time on long VODs (Twitch chat is paginated).</div>
             </div>
           </label>
+        </div>
+
+        <div class="card">
+          <div class="card-header">
+            <h2 class="card-title">Browser cookies</h2>
+          </div>
+          <div class="field">
+            <label class="label" for="setting-cookies-browser">Use cookies from</label>
+            <select id="setting-cookies-browser">
+              <option value="">None</option>
+              <option value="chrome">Chrome</option>
+              <option value="firefox">Firefox</option>
+              <option value="edge">Edge</option>
+              <option value="brave">Brave</option>
+              <option value="opera">Opera</option>
+              <option value="vivaldi">Vivaldi</option>
+            </select>
+            <div class="hint">Lets yt-dlp pull age-gated / members-only / login-walled videos. <strong>Caveat:</strong> Chrome and Edge lock their cookie databases while open — yt-dlp will fail with a permission error. Close the browser before downloading, or use <strong>Firefox</strong> as your cookie source (its DB stays readable while running).</div>
+          </div>
         </div>
 
         <div class="card">
