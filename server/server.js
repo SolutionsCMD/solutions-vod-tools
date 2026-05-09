@@ -116,10 +116,15 @@ app.post('/api/download', async (req, res) => {
 
   // We omit `--hls-prefer-native` when a section is requested. The native HLS
   // downloader can't seek to a section — it'd write info.json then silently
-  // never start the actual transfer (that was the symptom in 1.2.0 reports).
-  // Letting yt-dlp pick its default (ffmpeg-based) HLS downloader handles
-  // sections fine. For full-VOD downloads we keep the native downloader since
-  // it's faster and more reliable for unseeked HLS.
+  // never start the actual transfer. Letting yt-dlp pick its default
+  // (ffmpeg-based) HLS downloader handles sections fine. For full-VOD
+  // downloads we keep the native downloader since it's faster and more
+  // reliable for unseeked HLS.
+  //
+  // No `--download-archive` here on purpose: the archive logs video IDs only,
+  // not formats, so once you grab audio-only of a video, the archive blocks
+  // a later video-quality re-download as "already done." yt-dlp's built-in
+  // file-existence check still prevents true duplicate runs.
   const ytArgs = [
     '-f', formatStr,
     '-N', '16',
@@ -127,7 +132,6 @@ app.post('/api/download', async (req, res) => {
     '--write-info-json',
     '--newline',
     '-o', '%(uploader)s - %(title)s [%(upload_date)s]/%(uploader)s - %(title)s [%(upload_date)s].%(ext)s',
-    '--download-archive', path.join(targetDir, 'archive.txt'),
     '-P', targetDir,
   ];
   if (!hasSection) {
