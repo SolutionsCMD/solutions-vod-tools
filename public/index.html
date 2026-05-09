@@ -125,19 +125,14 @@
       <section class="page active" id="page-download">
         <div class="page-header">
           <h1 class="page-title">Download &amp; cut</h1>
-          <p class="page-subtitle">Grab a VOD from Kick, Twitch, or YouTube — full or partial section. Trim during the download to save time on long streams.</p>
+          <p class="page-subtitle">Grab a VOD from Kick, Twitch, or YouTube. Drag the slider or use the chips to trim during the download — no waiting for a re-encode after.</p>
         </div>
 
         <div class="card">
           <div class="field">
             <label class="label" for="url">VOD URL</label>
             <input type="text" id="url" placeholder="https://kick.com/... · https://twitch.tv/videos/... · https://youtube.com/watch?v=...">
-          </div>
-
-          <div class="field">
-            <label class="label" for="outputDir">Output folder <span style="color: var(--text-tertiary); font-weight: normal;">(optional)</span></label>
-            <input type="text" id="outputDir" placeholder="Default: configured output folder">
-            <div class="hint">Leave blank to use the default. Folder will be created if it doesn't exist.</div>
+            <div class="hint" id="probe-status" style="margin-top: 6px; min-height: 18px;"></div>
           </div>
 
           <div class="field">
@@ -146,36 +141,55 @@
             <div class="hint" id="quality-hint-download"></div>
           </div>
 
-          <div class="field-row">
-            <div class="field">
-              <label class="label" for="start">Start time</label>
-              <input type="text" id="start" placeholder="00:00:00">
-            </div>
-            <div class="field">
-              <label class="label" for="end">End time</label>
-              <input type="text" id="end" placeholder="HH:MM:SS">
-            </div>
-          </div>
-          <div class="hint" style="margin-top:-10px;">Setting either time downloads only that section — much faster, especially while the streamer is still live.</div>
+          <div class="field">
+            <label class="label">Trim <span style="color: var(--text-tertiary); font-weight: normal;">(optional — leave blank for the full VOD)</span></label>
 
-          <label style="display: flex; align-items: center; gap: 8px; padding: 12px 0 0; color: var(--text-secondary); font-size: var(--fs-sm); cursor: pointer;">
-            <input type="checkbox" id="dl-include-chat">
-            Include chat replay (Twitch + YouTube only)
-          </label>
+            <!-- Quick-pick chips. Each sets start/end based on the probed duration. -->
+            <div class="trim-chips" id="trim-chips">
+              <button class="trim-chip" data-trim="full">Full</button>
+              <button class="trim-chip" data-trim="first-5m">First 5m</button>
+              <button class="trim-chip" data-trim="first-30m">First 30m</button>
+              <button class="trim-chip" data-trim="first-hour">First 1h</button>
+              <button class="trim-chip" data-trim="last-5m">Last 5m</button>
+              <button class="trim-chip" data-trim="last-30m">Last 30m</button>
+              <button class="trim-chip" data-trim="last-hour">Last 1h</button>
+              <button class="trim-chip" data-trim="skip-first-30m">Skip first 30m</button>
+            </div>
 
-          <div class="field" style="margin-top: 12px;">
-            <label class="label" for="dl-cookies-browser">Browser cookies <span style="color: var(--text-tertiary); font-weight: normal;">(for age-gated / login-walled videos)</span></label>
-            <select id="dl-cookies-browser">
-              <option value="">None</option>
-              <option value="chrome">Chrome</option>
-              <option value="firefox">Firefox</option>
-              <option value="edge">Edge</option>
-              <option value="brave">Brave</option>
-              <option value="opera">Opera</option>
-              <option value="vivaldi">Vivaldi</option>
-            </select>
-            <div class="hint">Default comes from Settings. Chrome/Edge lock their cookie DB while running — close the browser first, or use Firefox.</div>
+            <!-- Dual-handle slider; only meaningful once we know the duration -->
+            <div class="trim-slider-wrap" id="trim-slider-wrap">
+              <div class="trim-track" id="trim-track">
+                <div class="trim-fill" id="trim-fill"></div>
+                <input type="range" id="trim-start-slider" min="0" max="0" value="0" step="1">
+                <input type="range" id="trim-end-slider" min="0" max="0" value="0" step="1">
+              </div>
+              <div class="trim-readouts">
+                <div>
+                  <label class="label" for="start">Start</label>
+                  <input type="text" id="start" placeholder="0:00:00 or 5m or 1h30m" autocomplete="off">
+                </div>
+                <div class="trim-duration-display" id="trim-duration-display">—</div>
+                <div>
+                  <label class="label" for="end">End</label>
+                  <input type="text" id="end" placeholder="leave blank for end of VOD" autocomplete="off">
+                </div>
+              </div>
+            </div>
+            <div class="hint" style="margin-top: 6px;">Inputs accept <code>HH:MM:SS</code>, <code>5m</code>, <code>1h30m</code>, or plain seconds. Drag the slider once the URL is detected. Setting either time skips re-downloading the rest.</div>
           </div>
+
+          <details class="advanced-section">
+            <summary>Advanced</summary>
+            <div class="field" style="margin-top: 12px;">
+              <label class="label" for="outputDir">Output folder <span style="color: var(--text-tertiary); font-weight: normal;">(optional)</span></label>
+              <input type="text" id="outputDir" placeholder="Default: configured output folder">
+              <div class="hint">Leave blank to use the default. Folder will be created if it doesn't exist.</div>
+            </div>
+            <label style="display: flex; align-items: center; gap: 8px; padding: 12px 0 0; color: var(--text-secondary); font-size: var(--fs-sm); cursor: pointer;">
+              <input type="checkbox" id="dl-include-chat">
+              Include chat replay (Twitch + YouTube only)
+            </label>
+          </details>
 
           <div class="btn-row" style="margin-top: 18px;">
             <button class="btn btn-primary" id="btn-start-download">Start</button>
@@ -498,18 +512,17 @@
           <div class="hint" style="margin-bottom: 12px;">
             For age-gated, members-only, or login-walled YouTube content. Export
             a <code>cookies.txt</code> from your real browser and import it here —
-            yt-dlp will use it automatically. Recommended over the browser-cookies
-            dropdown below (which fails on recent Chrome/Edge with a DPAPI error).
+            yt-dlp uses it automatically for every download afterwards.
             <br><br>
             <strong>How to export:</strong>
             <ol style="margin: 6px 0 0 18px; padding: 0;">
-              <li>Install the free
+              <li>Install
                 <a href="#" data-extlink="https://chromewebstore.google.com/detail/get-cookiestxt-locally/cclelndahbckbenkjhflpdbgdldlbecc">Get cookies.txt LOCALLY</a>
-                extension (Chrome / Edge / Brave) or
+                (Chrome / Edge / Brave) or
                 <a href="#" data-extlink="https://addons.mozilla.org/en-US/firefox/addon/cookies-txt/">cookies.txt</a> (Firefox).</li>
-              <li>Sign in to YouTube in that browser. (For age-gated content, watch the video once to confirm the gate accepts your account.)</li>
-              <li>While on a youtube.com tab, click the extension icon → <em>Export</em>. Save the <code>.txt</code> file anywhere.</li>
-              <li>Click <strong>Import cookies.txt</strong> below and pick the file you just saved.</li>
+              <li>Sign in to YouTube in that browser. For age-gated content, watch the video once to confirm the gate accepts your account.</li>
+              <li>On a youtube.com tab, click the extension icon → <em>Export</em>. Save the <code>.txt</code> anywhere.</li>
+              <li>Click <strong>Import cookies.txt</strong> below and pick the file.</li>
             </ol>
           </div>
           <div style="display: flex; align-items: center; gap: 10px; flex-wrap: wrap;">
@@ -519,24 +532,6 @@
           </div>
         </div>
 
-        <div class="card">
-          <div class="card-header">
-            <h2 class="card-title">Browser cookies <span style="color: var(--text-tertiary); font-weight: normal; font-size: var(--fs-sm);">(fallback)</span></h2>
-          </div>
-          <div class="field">
-            <label class="label" for="setting-cookies-browser">Use cookies from</label>
-            <select id="setting-cookies-browser">
-              <option value="">None</option>
-              <option value="chrome">Chrome</option>
-              <option value="firefox">Firefox</option>
-              <option value="edge">Edge</option>
-              <option value="brave">Brave</option>
-              <option value="opera">Opera</option>
-              <option value="vivaldi">Vivaldi</option>
-            </select>
-            <div class="hint">Only used when the YouTube sign-in above is empty. <strong>Caveat:</strong> Chrome and Edge use DPAPI / app-bound encryption that yt-dlp often can't decrypt — if you see "Failed to decrypt with DPAPI", use the YouTube sign-in instead, or pick Firefox here.</div>
-          </div>
-        </div>
 
         <div class="card">
           <div class="card-header">

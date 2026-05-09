@@ -496,12 +496,13 @@ ipcMain.handle('updates:check', async () => {
   return true;
 });
 
-// -------- YouTube sign-in (cookies.txt for yt-dlp) --------
-// Opens an embedded Chromium window pointed at youtube.com using a persistent
-// session partition. After the user signs in and closes the window, we dump
-// every cookie in that session to a Netscape-format cookies.txt that yt-dlp
-// can read with `--cookies <path>`. Sidesteps the DPAPI mess that breaks
-// `--cookies-from-browser chrome|edge` on recent Chromium versions.
+// -------- Cookies.txt import (for yt-dlp's --cookies flag) --------
+// User exports a Netscape cookies.txt from their real browser via a free
+// extension ("Get cookies.txt LOCALLY" / "cookies.txt") and imports it here.
+// We validate the format and copy it into userData where yt-dlp can read it.
+// Why not --cookies-from-browser? DPAPI / app-bound encryption on recent
+// Chrome/Edge breaks that path. Why not embedded sign-in? Google blocks
+// sign-ins from any embedded Chromium regardless of UA spoofing.
 
 // Validate that a file looks like a Netscape cookies.txt:
 //   - Either has the standard header line, OR

@@ -996,6 +996,205 @@ input[type="range"]:focus::-webkit-slider-thumb { box-shadow: var(--shadow-glow)
 .watcher-btn:hover { background: var(--bg-hover); color: var(--text-primary); }
 .watcher-btn.danger { color: var(--danger); border-color: var(--danger-border); }
 .watcher-btn.danger:hover { background: var(--danger-bg); }
+.watcher-btn.primary { color: var(--accent); border-color: var(--accent-border, var(--border)); }
+.watcher-btn.primary:hover { background: var(--accent-bg, var(--bg-hover)); }
+
+/* Inline number input + button for "Skip next N min" */
+.watcher-skip-inline {
+  display: inline-flex; align-items: center; gap: 6px;
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  padding: 2px 4px 2px 10px;
+}
+.watcher-skip-inline input {
+  width: 50px;
+  background: transparent;
+  border: 0;
+  color: var(--text-primary);
+  font-family: inherit;
+  font-size: var(--fs-sm);
+  padding: 4px 0;
+  text-align: right;
+}
+.watcher-skip-inline input:focus { outline: none; }
+.watcher-skip-inline span {
+  color: var(--text-tertiary);
+  font-size: var(--fs-sm);
+}
+.watcher-skip-inline button {
+  background: var(--bg-hover);
+  border: 0; border-radius: var(--r-sm);
+  color: var(--text-secondary);
+  padding: 4px 10px;
+  font-family: inherit; font-size: var(--fs-sm);
+  cursor: pointer;
+}
+.watcher-skip-inline button:hover { color: var(--text-primary); }
+
+/* Skip-timer countdown pill on a paused watcher */
+.skip-countdown {
+  display: inline-flex; align-items: center; gap: 8px;
+  padding: 4px 10px;
+  border-radius: var(--r-sm);
+  background: var(--warn-bg);
+  border: 1px solid var(--warn-border, var(--border));
+  color: var(--warn);
+  font-size: var(--fs-sm);
+  font-family: var(--font-mono);
+}
+
+/* ============================================================
+   DOWNLOAD — trim chips + dual-handle slider
+   ============================================================ */
+.trim-chips {
+  display: flex; gap: 6px; flex-wrap: wrap;
+  margin-bottom: 12px;
+}
+.trim-chip {
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--text-secondary);
+  padding: 6px 12px;
+  font-family: inherit;
+  font-size: var(--fs-sm);
+  cursor: pointer;
+  transition: background var(--t-fast), color var(--t-fast), border-color var(--t-fast);
+}
+.trim-chip:hover { background: var(--bg-hover); color: var(--text-primary); }
+.trim-chip.active {
+  background: var(--accent-bg, var(--bg-hover));
+  color: var(--accent);
+  border-color: var(--accent);
+}
+.trim-chip:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.trim-slider-wrap {
+  display: flex; flex-direction: column; gap: 12px;
+}
+.trim-track {
+  position: relative;
+  height: 28px;
+  margin: 0 12px;
+}
+.trim-track::before {
+  content: '';
+  position: absolute;
+  left: 0; right: 0; top: 50%;
+  height: 4px; transform: translateY(-50%);
+  background: var(--bg-input);
+  border-radius: 2px;
+}
+.trim-fill {
+  position: absolute;
+  top: 50%; height: 4px; transform: translateY(-50%);
+  background: var(--accent);
+  border-radius: 2px;
+  pointer-events: none;
+}
+.trim-track input[type="range"] {
+  position: absolute;
+  top: 0; left: 0;
+  width: 100%; height: 28px;
+  margin: 0; padding: 0;
+  background: transparent;
+  -webkit-appearance: none;
+  appearance: none;
+  pointer-events: none; /* track handles individually */
+}
+.trim-track input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 18px; height: 18px;
+  border-radius: 50%;
+  background: var(--accent);
+  border: 2px solid var(--bg);
+  box-shadow: 0 1px 4px rgba(0,0,0,0.5);
+  cursor: grab;
+  pointer-events: auto;
+}
+.trim-track input[type="range"]:active::-webkit-slider-thumb {
+  cursor: grabbing;
+  transform: scale(1.1);
+}
+.trim-track input[type="range"]::-moz-range-thumb {
+  width: 18px; height: 18px;
+  border-radius: 50%;
+  background: var(--accent);
+  border: 2px solid var(--bg);
+  cursor: grab;
+  pointer-events: auto;
+}
+.trim-track input[type="range"]:disabled::-webkit-slider-thumb {
+  background: var(--text-tertiary);
+  cursor: not-allowed;
+}
+.trim-track input[type="range"]:disabled::-moz-range-thumb {
+  background: var(--text-tertiary);
+  cursor: not-allowed;
+}
+
+.trim-readouts {
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
+  gap: 16px;
+  align-items: end;
+}
+.trim-readouts input[type="text"] {
+  width: 100%;
+  padding: 8px 10px;
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+}
+.trim-readouts input[type="text"]:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+.trim-duration-display {
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+  color: var(--text-tertiary);
+  padding: 0 8px 8px;
+  white-space: nowrap;
+}
+
+/* Collapsible "Advanced" section under the trim controls */
+.advanced-section {
+  margin-top: 16px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--r-md);
+  background: var(--bg-input-subtle, transparent);
+}
+.advanced-section summary {
+  list-style: none;
+  cursor: pointer;
+  padding: 10px 14px;
+  color: var(--text-secondary);
+  font-size: var(--fs-sm);
+  font-weight: 500;
+  user-select: none;
+  display: flex; align-items: center; gap: 8px;
+}
+.advanced-section summary::-webkit-details-marker { display: none; }
+.advanced-section summary::before {
+  content: '›';
+  display: inline-block;
+  transition: transform var(--t-fast);
+  color: var(--text-tertiary);
+}
+.advanced-section[open] summary::before { transform: rotate(90deg); }
+.advanced-section summary:hover { color: var(--text-primary); }
+.advanced-section > *:not(summary) {
+  padding: 0 14px 14px;
+}
 
 /* ============================================================
    STITCH / CLEANUP — parts list & VOD list

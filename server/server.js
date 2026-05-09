@@ -75,7 +75,7 @@ function streamProcess(proc, res, label) {
 
 // -------- Download (with optional section) --------
 app.post('/api/download', async (req, res) => {
-  const { url, startTime, endTime, outputDir, qualityPreset, customFormat, includeChatReplay, cookiesFromBrowser } = req.body;
+  const { url, startTime, endTime, outputDir, qualityPreset, customFormat, includeChatReplay } = req.body;
 
   if (!url) {
     res.status(400).json({ error: 'URL required' });
@@ -148,23 +148,12 @@ app.post('/api/download', async (req, res) => {
     writeLine(res, `[info] Section: ${startStr} to ${endStr} (partial download)`);
   }
 
-  // Cookies for age-gated / login-walled content. Precedence:
-  //   1. cookies.txt written by the in-app YouTube sign-in (most reliable —
-  //      no DPAPI dance, no browser-locked DBs).
-  //   2. --cookies-from-browser <browser> from the per-job dropdown or the
-  //      global setting (works for Firefox; flaky for Chrome/Edge).
-  //   3. Nothing.
+  // Cookies for age-gated / login-walled content. The user imports a
+  // Netscape cookies.txt via Settings → "YouTube cookies (import)"; if that
+  // file exists, every yt-dlp invocation gets `--cookies <path>`.
   if (COOKIES_FILE && fs.existsSync(COOKIES_FILE)) {
     ytArgs.push('--cookies', COOKIES_FILE);
-    writeLine(res, `[info] Cookies: signed-in YouTube session`);
-  } else {
-    const cookieBrowser = (typeof cookiesFromBrowser === 'string'
-      ? cookiesFromBrowser
-      : settings.get().cookiesFromBrowser || '').toLowerCase();
-    if (cookieBrowser) {
-      ytArgs.push('--cookies-from-browser', cookieBrowser);
-      writeLine(res, `[info] Cookies: from ${cookieBrowser}`);
-    }
+    writeLine(res, `[info] Cookies: imported cookies.txt`);
   }
 
   ytArgs.push(url);
@@ -466,6 +455,61 @@ app.post('/api/cleanup', async (req, res) => {
   res.json({ deleted, failed, freedBytes, killedProcesses });
 });
 
+// -------- Probe a VOD URL to get duration + title (for the trim slider) --------
+// Spawns yt-dlp with --dump-single-json --skip-download. Cheap (just an
+// info-extract round trip), no actual download. Returns null fields when we
+// can't determine them rather than failing — the UI falls back to plain
+// text inputs in that case.
+app.get('/api/probe', async (req, res) => {
+  const url = (req.query.url || '').trim();
+  if (!url || !/^https?:\/\//.test(url)) {
+    return res.status(400).json({ error: 'url required (http/https)' });
+  }
+  const args = ['--dump-single-json', '--skip-download', '--no-warnings'];
+  if (COOKIES_FILE && fs.existsSync(COOKIES_FILE)) {
+    args.push('--cookies', COOKIES_FILE);
+  }
+  args.push(url);
+
+  const proc = spawn(YTDLP, args, { windowsHide: true });
+  let out = '', err = '';
+  proc.stdout.on('data', d => { out += d.toString(); });
+  proc.stderr.on('data', d => { err += d.toString(); });
+
+  let timedOut = false;
+  const timer = setTimeout(() => {
+    timedOut = true;
+    try { proc.kill('SIGTERM'); } catch (e) { /* ignore */ }
+  }, 25000);
+
+  proc.on('close', code => {
+    clearTimeout(timer);
+    if (timedOut) {
+      return res.status(504).json({ error: 'probe timed out (25s)' });
+    }
+    if (code !== 0) {
+      // Surface the upstream error tail so the user sees what's wrong (often
+      // a Cloudflare block or a missing cookies file).
+      return res.status(502).json({ error: 'yt-dlp probe failed', detail: err.trim().slice(-500) || `exit ${code}` });
+    }
+    let info;
+    try { info = JSON.parse(out); }
+    catch (e) { return res.status(502).json({ error: 'probe returned non-JSON', detail: out.slice(0, 300) }); }
+    res.json({
+      title: info.title || null,
+      uploader: info.uploader || info.channel || null,
+      durationSec: typeof info.duration === 'number' ? info.duration : null,
+      thumbnail: info.thumbnail || null,
+      isLive: !!info.is_live,
+      wasLive: !!info.was_live,
+    });
+  });
+  proc.on('error', err => {
+    clearTimeout(timer);
+    res.status(500).json({ error: err.message });
+  });
+});
+
 // -------- Manually kill stray download/encoder processes --------
 app.post('/api/kill-stray', (req, res) => {
   if (process.platform !== 'win32') {
@@ -562,16 +606,9 @@ function startRecording(key) {
     '--no-part',
     '-o', outputPath,
   ];
-  // Cookies for age-gated / members-only / login-walled live content. Same
-  // precedence as the download path: signed-in cookies.txt > browser dropdown
-  // > nothing.
+  // Cookies for age-gated / members-only / login-walled live content.
   if (COOKIES_FILE && fs.existsSync(COOKIES_FILE)) {
     args.push('--cookies', COOKIES_FILE);
-  } else {
-    const cookieBrowser = (settings.get().cookiesFromBrowser || '').toLowerCase();
-    if (cookieBrowser) {
-      args.push('--cookies-from-browser', cookieBrowser);
-    }
   }
   args.push(platform.streamUrl(watcher.channel));
 
@@ -598,7 +635,6 @@ function startRecording(key) {
         streamUrl: platform.streamUrl(watcher.channel),
         ytdlpPath: YTDLP,
         cookiesFile: (COOKIES_FILE && fs.existsSync(COOKIES_FILE)) ? COOKIES_FILE : null,
-        cookiesFromBrowser: (settings.get().cookiesFromBrowser || '').toLowerCase(),
       }, (msg) => {
         // Pipe chat log lines into the watcher's logTail so they show in the UI.
         watcher.logTail.push(msg);
@@ -664,6 +700,21 @@ function startRecording(key) {
 
     watcher.recordingProcess = null;
     watcher.lastExitCode = code;
+
+    // Split-here: the close was triggered intentionally to chunk the recording.
+    // Immediately spin up a fresh session for the same watcher (sibling folder).
+    if (watcher.splitRequested && watcher.enabled && !watcher.paused) {
+      watcher.splitRequested = false;
+      // Tiny delay so the file system flush settles before we open another
+      // ytdlp on the same channel. Cosmetic — the streams are independent.
+      setTimeout(() => {
+        if (liveWatchers.get(key) === watcher && watcher.enabled && !watcher.paused) {
+          startRecording(key);
+        }
+      }, 250);
+      return;
+    }
+
     if (watcher.enabled) watcher.state = 'polling';
     else {
       liveWatchers.delete(key);
@@ -680,6 +731,15 @@ async function pollWatcher(key) {
   if (!watcher || !watcher.enabled) return;
   const platform = getPlatform(watcher.platform);
   if (!platform) return;
+
+  // Skip-timer expiry: when a "skip next N min" was scheduled, the watcher is
+  // paused with `skipUntil` set. As soon as that time passes, auto-resume so
+  // recording starts again on the next poll (or this one).
+  if (watcher.paused && watcher.skipUntil && Date.now() >= watcher.skipUntil) {
+    watcher.paused = false;
+    watcher.skipUntil = null;
+    saveLiveState();
+  }
 
   watcher.lastCheck = Date.now();
   const status = await platform.checkLive(watcher.channel, platformCtx);
@@ -705,6 +765,19 @@ async function pollWatcher(key) {
     } catch (e) { /* ignore */ }
     watcher.lastRecordedTitle = status.title;
   }
+}
+
+// Kill a watcher's running yt-dlp process. Cross-platform; safe to call when
+// no process is running. The 'close' event handler does the cleanup.
+function killRecordingProcess(watcher) {
+  if (!watcher || !watcher.recordingProcess) return;
+  try {
+    if (process.platform === 'win32') {
+      require('child_process').spawnSync('taskkill', ['/pid', watcher.recordingProcess.pid, '/f', '/t'], { windowsHide: true });
+    } else {
+      watcher.recordingProcess.kill('SIGTERM');
+    }
+  } catch (e) { /* ignore */ }
 }
 
 function startWatching(platformId, channel) {
@@ -759,13 +832,7 @@ function stopWatching(platformId, channel, alsoKillRecording = false) {
   }
 
   if (watcher.recordingProcess && alsoKillRecording) {
-    try {
-      if (process.platform === 'win32') {
-        require('child_process').spawnSync('taskkill', ['/pid', watcher.recordingProcess.pid, '/f', '/t'], { windowsHide: true });
-      } else {
-        watcher.recordingProcess.kill('SIGTERM');
-      }
-    } catch (e) { /* ignore */ }
+    killRecordingProcess(watcher);
   }
 
   if (!watcher.recordingProcess) {
@@ -897,6 +964,7 @@ app.get('/api/live', (req, res) => {
       channel: w.channel,
       enabled: w.enabled,
       paused: !!w.paused,
+      skipUntil: w.skipUntil || null,
       state: w.state,
       lastCheck: w.lastCheck,
       lastStatus: w.lastStatus,
@@ -944,25 +1012,57 @@ app.post('/api/live/stop-recording', (req, res) => {
   if (!r.watcher) return res.status(404).json({ error: 'not watching' });
 
   r.watcher.paused = true;
-  if (r.watcher.recordingProcess) {
-    try {
-      if (process.platform === 'win32') {
-        require('child_process').spawnSync('taskkill', ['/pid', r.watcher.recordingProcess.pid, '/f', '/t'], { windowsHide: true });
-      } else {
-        r.watcher.recordingProcess.kill('SIGTERM');
-      }
-    } catch (e) { /* ignore */ }
-  }
+  r.watcher.skipUntil = null;
+  killRecordingProcess(r.watcher);
   saveLiveState();
   res.json({ ok: true });
 });
 
-// Unpause — will auto-record again when live detected
+// Split here: finalize the current recording and immediately spin up a fresh
+// session in a sibling folder. The watcher stays in 'recording' state from the
+// user's perspective; auto-record continues. Use case: cut out a segment of
+// the stream cleanly without losing the rest.
+app.post('/api/live/split', (req, res) => {
+  const r = resolveWatcherFromBody(req);
+  if (!r.ok) return res.status(r.status).json({ error: r.error });
+  if (!r.watcher) return res.status(404).json({ error: 'not watching' });
+  if (!r.watcher.recordingProcess) return res.status(400).json({ error: 'not currently recording' });
+
+  r.watcher.splitRequested = true;
+  killRecordingProcess(r.watcher);
+  // The 'close' handler on the recording process picks up splitRequested and
+  // re-spawns a fresh session.
+  res.json({ ok: true });
+});
+
+// Skip next N minutes: stop the current recording, pause auto-record, and
+// schedule auto-resume after `minutes`. Useful for skipping known segments
+// (e.g., gambling) without leaving the watcher manually paused.
+app.post('/api/live/skip', (req, res) => {
+  const r = resolveWatcherFromBody(req);
+  if (!r.ok) return res.status(r.status).json({ error: r.error });
+  if (!r.watcher) return res.status(404).json({ error: 'not watching' });
+
+  const minutes = parseFloat(req.body && req.body.minutes);
+  if (!Number.isFinite(minutes) || minutes <= 0 || minutes > 24 * 60) {
+    return res.status(400).json({ error: 'minutes must be a positive number ≤ 1440' });
+  }
+
+  r.watcher.paused = true;
+  r.watcher.skipUntil = Date.now() + Math.round(minutes * 60 * 1000);
+  killRecordingProcess(r.watcher);
+  saveLiveState();
+  res.json({ ok: true, skipUntil: r.watcher.skipUntil });
+});
+
+// Unpause — will auto-record again when live detected. Also clears skipUntil
+// so a manual resume cancels any pending skip-timer.
 app.post('/api/live/resume', (req, res) => {
   const r = resolveWatcherFromBody(req);
   if (!r.ok) return res.status(r.status).json({ error: r.error });
   if (!r.watcher) return res.status(404).json({ error: 'not watching' });
   r.watcher.paused = false;
+  r.watcher.skipUntil = null;
   saveLiveState();
   res.json({ ok: true });
 });

@@ -355,18 +355,247 @@ async function streamJob(tab, url, body) {
   }
 }
 
+// =================================================================
+// Trim picker (Download form): smart text input + chips + dual-handle slider
+// =================================================================
+//
+// State of the trim picker for the URL currently in the URL field.
+const trimState = {
+  url: '',         // last URL we probed
+  durationSec: 0,  // total VOD length in seconds, 0 if unknown
+  probing: false,
+};
+
+// Parse user-friendly time strings into seconds. Accepts:
+//   "" / null            → null (no constraint)
+//   "90"                 → 90 seconds
+//   "1:30"               → 1 minute 30 seconds
+//   "1:23:45"            → 1h 23m 45s
+//   "5m" / "1h30m"       → 5 minutes / 1 hour 30 minutes
+//   "1h30m45s"           → 1 hour 30 minutes 45 seconds
+// Returns null for unparseable input so the caller can either show an error
+// or silently ignore (and let the field be empty).
+function parseTimeInput(raw) {
+  if (raw == null) return null;
+  const s = String(raw).trim().toLowerCase();
+  if (!s) return null;
+  // Plain integer → seconds
+  if (/^\d+$/.test(s)) return parseInt(s, 10);
+  // HH:MM:SS, MM:SS, M:SS — colon-separated
+  if (/^\d+(?::\d+){1,2}$/.test(s)) {
+    const parts = s.split(':').map(p => parseInt(p, 10));
+    let total = 0;
+    for (const p of parts) { total = total * 60 + (Number.isFinite(p) ? p : 0); }
+    return total;
+  }
+  // "1h30m45s" / "5m" / "90s" — unit suffixes
+  const m = s.match(/^(?:(\d+)h)?(?:(\d+)m)?(?:(\d+)s)?$/);
+  if (m && (m[1] || m[2] || m[3])) {
+    const h = parseInt(m[1] || '0', 10);
+    const min = parseInt(m[2] || '0', 10);
+    const sec = parseInt(m[3] || '0', 10);
+    return h * 3600 + min * 60 + sec;
+  }
+  return null;
+}
+
+function secondsToHms(total) {
+  if (!Number.isFinite(total) || total < 0) return '';
+  total = Math.round(total);
+  const h = Math.floor(total / 3600);
+  const m = Math.floor((total % 3600) / 60);
+  const s = total % 60;
+  const pad = (n) => String(n).padStart(2, '0');
+  return `${pad(h)}:${pad(m)}:${pad(s)}`;
+}
+
+function setTrimDurationDisplay() {
+  const el = document.getElementById('trim-duration-display');
+  if (!el) return;
+  if (trimState.durationSec > 0) {
+    el.textContent = `total ${secondsToHms(trimState.durationSec)}`;
+  } else {
+    el.textContent = '—';
+  }
+}
+
+function setTrimSliderEnabled(enabled) {
+  const start = document.getElementById('trim-start-slider');
+  const end = document.getElementById('trim-end-slider');
+  if (!start || !end) return;
+  start.disabled = !enabled;
+  end.disabled = !enabled;
+}
+
+function updateTrimFillFromSliders() {
+  const start = document.getElementById('trim-start-slider');
+  const end = document.getElementById('trim-end-slider');
+  const fill = document.getElementById('trim-fill');
+  if (!start || !end || !fill) return;
+  const max = parseInt(start.max, 10) || 1;
+  const a = Math.min(parseInt(start.value, 10) || 0, parseInt(end.value, 10) || max);
+  const b = Math.max(parseInt(start.value, 10) || 0, parseInt(end.value, 10) || max);
+  fill.style.left = `${(a / max) * 100}%`;
+  fill.style.right = `${100 - (b / max) * 100}%`;
+}
+
+// Wire the slider handles to the text inputs (and vice versa).
+function syncSlidersFromInputs() {
+  if (trimState.durationSec <= 0) return;
+  const startSec = parseTimeInput(document.getElementById('start').value);
+  const endSec = parseTimeInput(document.getElementById('end').value);
+  const startSlider = document.getElementById('trim-start-slider');
+  const endSlider = document.getElementById('trim-end-slider');
+  if (startSlider) startSlider.value = startSec != null ? Math.min(startSec, trimState.durationSec) : 0;
+  if (endSlider) endSlider.value = endSec != null ? Math.min(endSec, trimState.durationSec) : trimState.durationSec;
+  updateTrimFillFromSliders();
+}
+
+function syncInputsFromSliders() {
+  const startSlider = document.getElementById('trim-start-slider');
+  const endSlider = document.getElementById('trim-end-slider');
+  if (!startSlider || !endSlider) return;
+  let a = parseInt(startSlider.value, 10) || 0;
+  let b = parseInt(endSlider.value, 10) || trimState.durationSec;
+  // Keep handles ordered (don't let start drag past end and vice versa).
+  if (a > b) { const t = a; a = b; b = t; startSlider.value = a; endSlider.value = b; }
+  document.getElementById('start').value = a > 0 ? secondsToHms(a) : '';
+  document.getElementById('end').value = b < trimState.durationSec ? secondsToHms(b) : '';
+  updateTrimFillFromSliders();
+  setActiveTrimChip(null); // any manual drag → clear chip selection
+}
+
+function applyTrimChip(kind) {
+  if (trimState.durationSec <= 0 && kind !== 'full') return;
+  const dur = trimState.durationSec;
+  let a = 0, b = dur;
+  switch (kind) {
+    case 'full':           a = 0; b = dur; break;
+    case 'first-5m':       a = 0; b = Math.min(5 * 60, dur); break;
+    case 'first-30m':      a = 0; b = Math.min(30 * 60, dur); break;
+    case 'first-hour':     a = 0; b = Math.min(60 * 60, dur); break;
+    case 'last-5m':        a = Math.max(0, dur - 5 * 60); b = dur; break;
+    case 'last-30m':       a = Math.max(0, dur - 30 * 60); b = dur; break;
+    case 'last-hour':      a = Math.max(0, dur - 60 * 60); b = dur; break;
+    case 'skip-first-30m': a = Math.min(30 * 60, dur); b = dur; break;
+    default: return;
+  }
+  document.getElementById('start').value = a > 0 ? secondsToHms(a) : '';
+  document.getElementById('end').value = (b > 0 && b < dur) ? secondsToHms(b) : (kind === 'full' ? '' : secondsToHms(b));
+  syncSlidersFromInputs();
+  setActiveTrimChip(kind);
+}
+
+function setActiveTrimChip(kind) {
+  document.querySelectorAll('.trim-chip').forEach(c => {
+    c.classList.toggle('active', c.dataset.trim === kind);
+  });
+}
+
+// Probe the URL via the server (yt-dlp --dump-json). Debounced — we don't
+// want to hit it on every keystroke.
+let probeTimer = null;
+function scheduleProbe() {
+  clearTimeout(probeTimer);
+  probeTimer = setTimeout(probeNow, 700);
+}
+async function probeNow() {
+  const urlInput = document.getElementById('url');
+  const status = document.getElementById('probe-status');
+  if (!urlInput || !status) return;
+  const url = urlInput.value.trim();
+  if (!url) {
+    trimState.url = '';
+    trimState.durationSec = 0;
+    status.textContent = '';
+    setTrimSliderEnabled(false);
+    setTrimDurationDisplay();
+    return;
+  }
+  if (url === trimState.url) return; // already probed
+  if (!/^https?:\/\//.test(url)) {
+    status.textContent = 'URL must start with http:// or https://';
+    return;
+  }
+  trimState.probing = true;
+  status.textContent = 'Looking up duration…';
+  try {
+    const res = await fetch('/api/probe?url=' + encodeURIComponent(url));
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      status.textContent = `Couldn't read VOD info (${body.error || res.status}). You can still type times manually.`;
+      trimState.url = url;
+      trimState.durationSec = 0;
+      setTrimSliderEnabled(false);
+      setTrimDurationDisplay();
+      return;
+    }
+    trimState.url = url;
+    trimState.durationSec = body.durationSec || 0;
+    if (body.isLive) {
+      status.textContent = 'Live stream — duration unknown until it ends.';
+      setTrimSliderEnabled(false);
+    } else if (trimState.durationSec > 0) {
+      const titleBit = body.title ? ` · ${body.title}` : '';
+      status.textContent = `Detected ${secondsToHms(trimState.durationSec)}${titleBit}`;
+      const startSlider = document.getElementById('trim-start-slider');
+      const endSlider = document.getElementById('trim-end-slider');
+      if (startSlider) { startSlider.max = trimState.durationSec; startSlider.value = 0; }
+      if (endSlider)   { endSlider.max   = trimState.durationSec; endSlider.value = trimState.durationSec; }
+      setTrimSliderEnabled(true);
+      updateTrimFillFromSliders();
+    } else {
+      status.textContent = body.title ? `Detected: ${body.title}` : 'Detected (duration unknown).';
+      setTrimSliderEnabled(false);
+    }
+    setTrimDurationDisplay();
+  } catch (err) {
+    status.textContent = `Probe error: ${err.message}`;
+  } finally {
+    trimState.probing = false;
+  }
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+  const urlEl = document.getElementById('url');
+  if (urlEl) {
+    urlEl.addEventListener('input', scheduleProbe);
+    urlEl.addEventListener('paste', () => setTimeout(probeNow, 50));
+  }
+
+  const startInput = document.getElementById('start');
+  const endInput = document.getElementById('end');
+  const onTimeBlur = () => { syncSlidersFromInputs(); setActiveTrimChip(null); };
+  if (startInput) startInput.addEventListener('blur', onTimeBlur);
+  if (endInput) endInput.addEventListener('blur', onTimeBlur);
+
+  const startSlider = document.getElementById('trim-start-slider');
+  const endSlider = document.getElementById('trim-end-slider');
+  if (startSlider) startSlider.addEventListener('input', syncInputsFromSliders);
+  if (endSlider)   endSlider.addEventListener('input', syncInputsFromSliders);
+
+  document.querySelectorAll('.trim-chip').forEach(chip => {
+    chip.addEventListener('click', () => applyTrimChip(chip.dataset.trim));
+  });
+
+  setTrimSliderEnabled(false);
+});
+
 document.getElementById('btn-start-download').addEventListener('click', () => {
   const url = document.getElementById('url').value.trim();
   if (!url) { alert('Paste a VOD URL first (Kick, Twitch, or YouTube).'); return; }
+  // Normalize the time inputs through the smart parser before sending so the
+  // server always receives HH:MM:SS (or empty).
+  const normalizedStart = parseTimeInput(document.getElementById('start').value);
+  const normalizedEnd = parseTimeInput(document.getElementById('end').value);
   streamJob('download', '/api/download', {
     url,
-    startTime: document.getElementById('start').value,
-    endTime: document.getElementById('end').value,
+    startTime: normalizedStart != null ? secondsToHms(normalizedStart) : '',
+    endTime: normalizedEnd != null ? secondsToHms(normalizedEnd) : '',
     outputDir: document.getElementById('outputDir').value,
     qualityPreset: qualityState.downloadPreset,
     customFormat: qualityState.appSettings && qualityState.appSettings.customFormat,
     includeChatReplay: document.getElementById('dl-include-chat').checked,
-    cookiesFromBrowser: (document.getElementById('dl-cookies-browser') || {}).value || '',
   });
 });
 
@@ -951,7 +1180,12 @@ function renderLiveWatchers(data) {
       stats += `<div><div class="watcher-stat-label">File size</div><div class="watcher-stat-value">${formatBytes(w.recordingSize || 0)}</div></div>`;
     } else if (isPaused) {
       const liveNow = w.lastStatus?.live;
-      stats += `<div><div class="watcher-stat-label">Auto-record</div><div class="watcher-stat-value" style="color: var(--warn);">Paused${liveNow ? ' (stream is live)' : ''}</div></div>`;
+      let pausedText = `Paused${liveNow ? ' (stream is live)' : ''}`;
+      if (w.skipUntil) {
+        const remainSec = Math.max(0, Math.round((w.skipUntil - Date.now()) / 1000));
+        pausedText = `Skip-resume in ${secondsToHms(remainSec)}`;
+      }
+      stats += `<div><div class="watcher-stat-label">Auto-record</div><div class="watcher-stat-value" style="color: var(--warn);">${pausedText}</div></div>`;
     } else {
       const ls = w.lastStatus || {};
       const pollSec = w.pollIntervalMs ? Math.round(w.pollIntervalMs / 1000) : '—';
@@ -976,9 +1210,18 @@ function renderLiveWatchers(data) {
     const platformAttr = `data-platform="${escapeHtmlStr(w.platform)}" data-channel="${escapeHtmlStr(w.channel)}"`;
     let buttons = '';
     if (isRec) {
-      buttons += `<button class="watcher-btn danger" data-action="stop-recording" ${platformAttr}>Stop recording</button>`;
+      // Split: keep recording, just chunk the file. Most common while live.
+      buttons += `<button class="watcher-btn primary" data-action="split" ${platformAttr} title="Finalize this file and immediately start a new one — auto-record stays on">✂ Split here</button>`;
+      // Skip: stop now, auto-resume after N minutes (defaults to 15).
+      buttons += `<span class="watcher-skip-inline" title="Stop recording, auto-resume in N minutes">`
+        + `<input type="number" min="1" max="1440" step="1" value="15" ${platformAttr} data-role="skip-minutes">`
+        + `<span>min</span>`
+        + `<button data-action="skip" ${platformAttr}>Skip</button>`
+        + `</span>`;
+      // Stop: full halt, also pauses auto-record.
+      buttons += `<button class="watcher-btn danger" data-action="stop-recording" ${platformAttr}>Stop &amp; pause</button>`;
     } else if (isPaused) {
-      buttons += `<button class="watcher-btn" data-action="resume" ${platformAttr}>Resume auto-record</button>`;
+      buttons += `<button class="watcher-btn primary" data-action="resume" ${platformAttr}>${w.skipUntil ? 'Resume now' : 'Resume auto-record'}</button>`;
     }
     buttons += `<button class="watcher-btn" data-action="unwatch" ${platformAttr}>Unwatch</button>`;
 
@@ -1015,6 +1258,39 @@ async function stopRecording(platform, channel) {
   refreshLive();
 }
 
+async function splitRecording(platform, channel) {
+  // No confirmation — split is a quick, non-destructive operation; the user
+  // just wants to chunk the file. The previous chunk is preserved on disk.
+  const res = await fetch('/api/live/split', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ platform, channel }),
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    alert('Split failed: ' + (body.error || res.status));
+  }
+  refreshLive();
+}
+
+async function skipRecording(platform, channel, minutes) {
+  if (!Number.isFinite(minutes) || minutes <= 0) {
+    alert('Enter how many minutes to skip (positive number).');
+    return;
+  }
+  if (!confirm(`Stop recording now and auto-resume in ${minutes} min?\n\nUseful for skipping known segments. You can also resume sooner via the Resume button.`)) return;
+  const res = await fetch('/api/live/skip', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ platform, channel, minutes }),
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    alert('Skip failed: ' + (body.error || res.status));
+  }
+  refreshLive();
+}
+
 async function resumeWatcher(platform, channel) {
   await fetch('/api/live/resume', {
     method: 'POST',
@@ -1045,6 +1321,14 @@ document.getElementById('watchers-list').addEventListener('click', (e) => {
   if (action === 'stop-recording') stopRecording(platform, channel);
   else if (action === 'resume') resumeWatcher(platform, channel);
   else if (action === 'unwatch') unwatchChannel(platform, channel);
+  else if (action === 'split') splitRecording(platform, channel);
+  else if (action === 'skip') {
+    // Pull the minutes value from the sibling input on the same watcher card.
+    const wrap = btn.closest('.watcher-skip-inline');
+    const minutesInput = wrap ? wrap.querySelector('input[data-role="skip-minutes"]') : null;
+    const minutes = minutesInput ? parseFloat(minutesInput.value) : 15;
+    skipRecording(platform, channel, minutes);
+  }
 });
 
 // Per-platform input hint and placeholder so the user knows what to paste.
@@ -1264,16 +1548,6 @@ function renderChatToggles() {
   if (dlChat) dlChat.checked = !!settings.chatVodReplayEnabled;
 }
 
-function renderCookiesSelectors() {
-  const settings = qualityState.appSettings || {};
-  const value = (settings.cookiesFromBrowser || '').toLowerCase();
-  const settingSel = document.getElementById('setting-cookies-browser');
-  if (settingSel) settingSel.value = value;
-  // Mirror to the per-job download dropdown so it defaults to the saved value.
-  const dlSel = document.getElementById('dl-cookies-browser');
-  if (dlSel) dlSel.value = value;
-}
-
 // ---------- Cookies.txt import ----------
 async function refreshCookiesStatus() {
   const pill = document.getElementById('cookies-status');
@@ -1320,7 +1594,6 @@ function renderAllQualityUI() {
   renderPerPlatformOverrides();
   renderAdvancedQualityToggle();
   renderChatToggles();
-  renderCookiesSelectors();
 }
 
 async function saveSettings(patch) {
@@ -1372,15 +1645,6 @@ document.addEventListener('DOMContentLoaded', () => {
   if (chatLive) chatLive.addEventListener('change', () => saveSettings({ chatLiveEnabled: chatLive.checked }));
   const chatVod = document.getElementById('setting-chat-vod');
   if (chatVod) chatVod.addEventListener('change', () => saveSettings({ chatVodReplayEnabled: chatVod.checked }));
-  const cookiesSel = document.getElementById('setting-cookies-browser');
-  if (cookiesSel) {
-    cookiesSel.addEventListener('change', async () => {
-      await saveSettings({ cookiesFromBrowser: cookiesSel.value });
-      // Re-mirror to the download form so the per-job dropdown follows the new default.
-      renderCookiesSelectors();
-    });
-  }
-
   const importBtn = document.getElementById('btn-cookies-import');
   if (importBtn && window.electron && window.electron.cookiesImport) {
     importBtn.addEventListener('click', async () => {
