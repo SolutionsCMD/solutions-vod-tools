@@ -135,6 +135,20 @@
             <div class="hint" id="probe-status" style="margin-top: 6px; min-height: 18px;"></div>
           </div>
 
+          <!-- VOD preview: thumbnail + title + uploader + duration. Filled
+               in by the probe response. Hidden until we have data. -->
+          <div class="vod-preview" id="vod-preview" hidden>
+            <div class="vod-thumb-wrap">
+              <img class="vod-thumb" id="vod-thumb" alt="">
+              <span class="vod-duration-badge" id="vod-duration-badge"></span>
+            </div>
+            <div class="vod-meta">
+              <div class="vod-title" id="vod-title"></div>
+              <div class="vod-uploader" id="vod-uploader"></div>
+              <div class="vod-flags" id="vod-flags"></div>
+            </div>
+          </div>
+
           <div class="field">
             <label class="label">Quality</label>
             <div class="quality-chips" id="quality-chips-download" data-target="download"></div>
@@ -175,7 +189,7 @@
             </div>
             <label style="display: flex; align-items: center; gap: 8px; padding: 12px 0 0; color: var(--text-secondary); font-size: var(--fs-sm); cursor: pointer;">
               <input type="checkbox" id="dl-include-chat">
-              Include chat replay (Twitch + YouTube only)
+              Include chat replay <span style="color: var(--text-tertiary);">(Twitch + YouTube only — slow on long VODs)</span>
             </label>
           </details>
 

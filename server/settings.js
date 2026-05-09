@@ -21,7 +21,9 @@ const DEFAULTS = {
 
   // Chat
   chatLiveEnabled: true,                     // capture chat during live recordings
-  chatVodReplayEnabled: true,                // pull chat replay when downloading VODs (Twitch/YouTube)
+  // VOD chat replay defaults to OFF — it's a slow paginated extra step that
+  // most users don't want by default. Toggle on in Settings or per-job.
+  chatVodReplayEnabled: false,
 };
 
 function makeStore(filePath) {

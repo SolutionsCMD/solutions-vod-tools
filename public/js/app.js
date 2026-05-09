@@ -471,6 +471,47 @@ function scheduleProbe() {
   clearTimeout(probeTimer);
   probeTimer = setTimeout(probeNow, 700);
 }
+function hideVodPreview() {
+  const card = document.getElementById('vod-preview');
+  if (card) card.hidden = true;
+}
+
+function renderVodPreview(body) {
+  const card = document.getElementById('vod-preview');
+  const thumb = document.getElementById('vod-thumb');
+  const title = document.getElementById('vod-title');
+  const uploader = document.getElementById('vod-uploader');
+  const durBadge = document.getElementById('vod-duration-badge');
+  const flags = document.getElementById('vod-flags');
+  if (!card || !thumb || !title || !uploader || !durBadge || !flags) return;
+
+  // Only show if we have at least a title or thumbnail to render — otherwise
+  // an empty card looks broken.
+  if (!body || (!body.title && !body.thumbnail)) {
+    card.hidden = true;
+    return;
+  }
+
+  if (body.thumbnail) {
+    thumb.src = body.thumbnail;
+    thumb.style.display = '';
+  } else {
+    thumb.removeAttribute('src');
+    thumb.style.display = 'none';
+  }
+  title.textContent = body.title || '(untitled)';
+  uploader.textContent = body.uploader || '';
+  uploader.style.display = body.uploader ? '' : 'none';
+  durBadge.textContent = body.durationSec > 0 ? secondsToHms(body.durationSec) : '';
+  durBadge.style.display = body.durationSec > 0 ? '' : 'none';
+
+  flags.innerHTML = '';
+  if (body.isLive) flags.innerHTML += `<span class="vod-flag live">live now</span>`;
+  else if (body.wasLive) flags.innerHTML += `<span class="vod-flag was-live">was live</span>`;
+
+  card.hidden = false;
+}
+
 async function probeNow() {
   const urlInput = document.getElementById('url');
   const status = document.getElementById('probe-status');
@@ -482,15 +523,18 @@ async function probeNow() {
     status.textContent = '';
     setTrimSliderEnabled(false);
     setTrimDurationDisplay();
+    hideVodPreview();
     return;
   }
   if (url === trimState.url) return; // already probed
   if (!/^https?:\/\//.test(url)) {
     status.textContent = 'URL must start with http:// or https://';
+    hideVodPreview();
     return;
   }
   trimState.probing = true;
-  status.textContent = 'Looking up duration…';
+  status.textContent = 'Looking up VOD info…';
+  hideVodPreview();
   try {
     const res = await fetch('/api/probe?url=' + encodeURIComponent(url));
     const body = await res.json().catch(() => ({}));
@@ -504,12 +548,16 @@ async function probeNow() {
     }
     trimState.url = url;
     trimState.durationSec = body.durationSec || 0;
+
+    renderVodPreview(body);
+
     if (body.isLive) {
       status.textContent = 'Live stream — duration unknown until it ends.';
       setTrimSliderEnabled(false);
     } else if (trimState.durationSec > 0) {
-      const titleBit = body.title ? ` · ${body.title}` : '';
-      status.textContent = `Detected ${secondsToHms(trimState.durationSec)}${titleBit}`;
+      // Preview card already shows duration; keep status minimal so it doesn't
+      // duplicate what the card communicates.
+      status.textContent = `Ready — drag the slider to trim, or leave full.`;
       const startSlider = document.getElementById('trim-start-slider');
       const endSlider = document.getElementById('trim-end-slider');
       if (startSlider) { startSlider.max = trimState.durationSec; startSlider.value = 0; }
@@ -517,7 +565,7 @@ async function probeNow() {
       setTrimSliderEnabled(true);
       updateTrimFillFromSliders();
     } else {
-      status.textContent = body.title ? `Detected: ${body.title}` : 'Detected (duration unknown).';
+      status.textContent = 'Detected (duration unknown — type times manually if needed).';
       setTrimSliderEnabled(false);
     }
     setTrimDurationDisplay();
