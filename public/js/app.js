@@ -1809,6 +1809,7 @@ async function refreshReplayHistory(watchers) {
         <div class="replay-row-meta">${formatBytes(r.sizeBytes)}</div>
         <div class="replay-row-meta">${escapeHtmlStr(ago)}</div>
         <button data-action="play" data-path="${safePath}" title="Play in default player">▶ Play</button>
+        <button data-action="trim" data-path="${safePath}" title="Open in the Cut tab to fine-tune">✂ Trim</button>
       </div>
     `;
   }
@@ -1897,11 +1898,19 @@ document.addEventListener('DOMContentLoaded', () => {
   const historyList = document.getElementById('replay-history-list');
   if (historyList) {
     historyList.addEventListener('click', (e) => {
-      const btn = e.target.closest('button[data-action="play"]');
+      const btn = e.target.closest('button[data-action]');
       if (!btn) return;
+      const action = btn.dataset.action;
       const filePath = btn.dataset.path;
-      if (filePath && window.electron && window.electron.libraryOpenFile) {
+      if (!filePath) return;
+      if (action === 'play' && window.electron && window.electron.libraryOpenFile) {
         window.electron.libraryOpenFile(filePath);
+      } else if (action === 'trim') {
+        // Switch to the Cut tab and pre-load this replay so the user can
+        // refine it with frame previews.
+        const cutNav = document.querySelector('.nav-item[data-page="cut"]');
+        if (cutNav) cutNav.click();
+        setTimeout(() => loadCutTabFile(filePath), 50);
       }
     });
   }
@@ -2248,6 +2257,41 @@ function syncCutTabInputsFromSliders() {
   document.getElementById('cut-tab-start').value = a > 0 ? secondsToHms(a) : '';
   document.getElementById('cut-tab-end').value   = b < cutTabState.durationSec ? secondsToHms(b) : '';
   updateCutTabFill();
+  // Update the timestamp labels above each preview frame.
+  const startLabel = document.getElementById('cut-tab-start-label');
+  const endLabel = document.getElementById('cut-tab-end-label');
+  if (startLabel) startLabel.textContent = secondsToHms(a);
+  if (endLabel)   endLabel.textContent   = secondsToHms(b);
+  // Debounced preview refreshes — don't slam the server while dragging.
+  scheduleCutTabPreview('start');
+  scheduleCutTabPreview('end');
+}
+
+// Debounced /api/frame fetch so dragging a slider doesn't fire dozens of
+// ffmpeg processes per second.
+const cutTabPreviewTimers = {};
+function scheduleCutTabPreview(which, delay = 250) {
+  clearTimeout(cutTabPreviewTimers[which]);
+  cutTabPreviewTimers[which] = setTimeout(() => updateCutTabPreview(which), delay);
+}
+function updateCutTabPreview(which) {
+  if (!cutTabState.filePath) return;
+  const img = document.getElementById('cut-tab-preview-' + which);
+  if (!img) return;
+  const slider = document.getElementById('cut-tab-' + which + '-slider');
+  if (!slider) return;
+  let timeSec = parseInt(slider.value, 10);
+  if (!Number.isFinite(timeSec)) timeSec = 0;
+  // /api/frame: -ss <time> for normal seeks. Cap at duration-1 so we don't
+  // ask for a frame past EOF (ffmpeg returns black or errors).
+  const cap = Math.max(0, cutTabState.durationSec - 1);
+  if (timeSec > cap) timeSec = cap;
+  img.classList.add('loading');
+  img.classList.remove('empty');
+  const url = `/api/frame?path=${encodeURIComponent(cutTabState.filePath)}&time=${encodeURIComponent(timeSec)}`;
+  img.onload = () => img.classList.remove('loading');
+  img.onerror = () => { img.classList.remove('loading'); img.classList.add('empty'); };
+  img.src = url;
 }
 
 async function loadCutTabFile(filePath) {
@@ -2286,6 +2330,13 @@ async function loadCutTabFile(filePath) {
       document.getElementById('cut-tab-trim-section').style.display = '';
       setCutTabSliderEnabled(true);
       updateCutTabFill();
+      // Reset the preview labels and fetch initial frames.
+      const startLabel = document.getElementById('cut-tab-start-label');
+      const endLabel = document.getElementById('cut-tab-end-label');
+      if (startLabel) startLabel.textContent = '0:00:00';
+      if (endLabel)   endLabel.textContent   = secondsToHms(Math.round(cutTabState.durationSec));
+      updateCutTabPreview('start');
+      updateCutTabPreview('end');
     }
   } catch (err) {
     document.getElementById('cut-tab-file-meta').textContent = `Probe error: ${err.message}`;
@@ -2312,8 +2363,16 @@ document.addEventListener('DOMContentLoaded', () => {
 
   const startInput = document.getElementById('cut-tab-start');
   const endInput = document.getElementById('cut-tab-end');
-  if (startInput) startInput.addEventListener('blur', syncCutTabSlidersFromInputs);
-  if (endInput)   endInput.addEventListener('blur', syncCutTabSlidersFromInputs);
+  // On blur, normalize the typed value into the slider AND refresh that
+  // side's preview so the frame matches the time the user typed.
+  if (startInput) startInput.addEventListener('blur', () => {
+    syncCutTabSlidersFromInputs();
+    updateCutTabPreview('start');
+  });
+  if (endInput) endInput.addEventListener('blur', () => {
+    syncCutTabSlidersFromInputs();
+    updateCutTabPreview('end');
+  });
 
   const cutBtn = document.getElementById('btn-start-cut-tab');
   if (cutBtn) {

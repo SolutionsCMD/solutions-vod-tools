@@ -386,7 +386,19 @@
 
           <div class="field" id="cut-tab-trim-section" style="display: none;">
             <label class="label">Trim range</label>
-            <div class="trim-slider-wrap">
+
+            <div class="cut-tab-previews">
+              <div>
+                <div class="watcher-stat-label" style="margin-bottom: 6px;">Start frame — <span id="cut-tab-start-label" style="font-family: var(--font-mono); color: var(--text-primary);">0:00:00</span></div>
+                <div class="preview-wrap"><img id="cut-tab-preview-start" class="preview-img" alt=""></div>
+              </div>
+              <div>
+                <div class="watcher-stat-label" style="margin-bottom: 6px;">End frame — <span id="cut-tab-end-label" style="font-family: var(--font-mono); color: var(--text-primary);">--:--:--</span></div>
+                <div class="preview-wrap"><img id="cut-tab-preview-end" class="preview-img" alt=""></div>
+              </div>
+            </div>
+
+            <div class="trim-slider-wrap" style="margin-top: 14px;">
               <div class="trim-track" id="cut-tab-track">
                 <div class="trim-fill" id="cut-tab-fill"></div>
                 <input type="range" id="cut-tab-start-slider" min="0" max="0" value="0" step="1">
@@ -404,7 +416,7 @@
                 </div>
               </div>
             </div>
-            <div class="hint" style="margin-top: 6px;">Inputs accept <code>HH:MM:SS</code>, <code>5m</code>, <code>1h30m</code>, or plain seconds. Drag the slider for visual seek.</div>
+            <div class="hint" style="margin-top: 6px;">Drag a slider handle to scrub, or type <code>HH:MM:SS</code> / <code>5m</code> / <code>1h30m</code>. Previews update as you drag.</div>
           </div>
 
           <label style="display: flex; align-items: center; gap: 8px; padding: 12px 0 0; color: var(--text-secondary); font-size: var(--fs-sm); cursor: pointer;">

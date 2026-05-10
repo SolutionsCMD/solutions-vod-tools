@@ -1140,7 +1140,7 @@ input[type="range"]:focus::-webkit-slider-thumb { box-shadow: var(--shadow-glow)
 }
 .replay-row {
   display: grid;
-  grid-template-columns: 1fr auto auto auto auto;
+  grid-template-columns: 1fr auto auto auto auto auto;
   gap: 12px;
   align-items: center;
   padding: 10px 12px;
@@ -1372,6 +1372,15 @@ input[type="range"]:focus::-webkit-slider-thumb { box-shadow: var(--shadow-glow)
   height: 1px;
   background: var(--border-subtle);
   margin: 4px 0;
+}
+
+/* ============================================================
+   CUT TAB — frame preview pair (start + end)
+   ============================================================ */
+.cut-tab-previews {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 18px;
 }
 
 /* ============================================================
