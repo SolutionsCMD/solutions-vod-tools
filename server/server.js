@@ -1374,6 +1374,124 @@ app.post('/api/live/skip', (req, res) => {
   res.json({ ok: true, skipUntil: r.watcher.skipUntil });
 });
 
+// Save the last N seconds of an active recording as a standalone replay
+// clip. Reads the live MPEG-TS file (which yt-dlp writes continuously
+// thanks to --hls-use-mpegts --no-part), seeks N seconds before its
+// current end, and stream-copies that range into a sibling `replays/`
+// folder. Fast (no re-encode) and safe to run while recording continues.
+app.post('/api/live/replay', async (req, res) => {
+  const r = resolveWatcherFromBody(req);
+  if (!r.ok) return res.status(r.status).json({ error: r.error });
+  if (!r.watcher) return res.status(404).json({ error: 'not watching' });
+  if (!r.watcher.recordingProcess || !r.watcher.currentFile) {
+    return res.status(400).json({ error: 'not currently recording' });
+  }
+  if (!fs.existsSync(r.watcher.currentFile)) {
+    return res.status(400).json({ error: 'recording file not on disk yet' });
+  }
+
+  const durationSec = parseFloat(req.body && req.body.durationSec);
+  const dur = Number.isFinite(durationSec) && durationSec > 0 && durationSec <= 600
+    ? Math.round(durationSec)
+    : 30; // sane default + cap; clips longer than 10 min defeat the purpose
+
+  const sessionDir = path.dirname(r.watcher.currentFile);
+  const replaysDir = path.join(sessionDir, 'replays');
+  try { fs.mkdirSync(replaysDir, { recursive: true }); } catch (e) { /* ignore */ }
+
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+  const replayPath = path.join(replaysDir, `replay-${stamp}-${dur}s.mp4`);
+
+  // -sseof -<N>: seek N seconds back from the file's current end.
+  // -t <N>: limit output to N seconds (so we don't accidentally read past
+  //   end if the file grows mid-extract — though stream copy generally
+  //   stops at the source EOF anyway).
+  // -c copy: stream copy, no re-encode. Cuts to nearest preceding keyframe.
+  // -avoid_negative_ts make_zero: clean PTS in the output.
+  const ffArgs = [
+    '-y',
+    '-sseof', `-${dur}`,
+    '-i', r.watcher.currentFile,
+    '-t', String(dur),
+    '-c', 'copy',
+    '-avoid_negative_ts', 'make_zero',
+    replayPath,
+  ];
+
+  const proc = spawn(FFMPEG, ffArgs, { windowsHide: true });
+  let stderr = '';
+  proc.stderr.on('data', d => { stderr += d.toString(); });
+
+  const timer = setTimeout(() => {
+    try { proc.kill('SIGKILL'); } catch (e) {}
+  }, 30000);
+
+  proc.on('close', code => {
+    clearTimeout(timer);
+    if (code !== 0 || !fs.existsSync(replayPath)) {
+      return res.status(502).json({
+        error: 'ffmpeg failed to extract replay',
+        detail: stderr.trim().slice(-500),
+      });
+    }
+    let stat = null;
+    try { stat = fs.statSync(replayPath); } catch (e) {}
+    res.json({
+      ok: true,
+      file: replayPath,
+      sizeBytes: stat ? stat.size : 0,
+      durationSec: dur,
+      sourceFile: r.watcher.currentFile,
+    });
+  });
+  proc.on('error', err => {
+    clearTimeout(timer);
+    res.status(500).json({ error: err.message });
+  });
+});
+
+// List previously-saved replays for a watcher (its current session dir's
+// replays/ subfolder). Used by the Replay tab to show a recent list.
+app.get('/api/live/replays', (req, res) => {
+  const platform = req.query.platform;
+  const channel = req.query.channel;
+  if (!platform || !channel) return res.status(400).json({ error: 'platform + channel required' });
+
+  // Find the watcher (case-normalized).
+  const r = resolveWatcherFromBody({ body: { platform, channel } });
+  if (!r.ok || !r.watcher) return res.json({ replays: [] });
+
+  const replays = [];
+  // Look across the watcher's recordingHistory so we surface clips from any
+  // session this watcher has produced (not just the current one).
+  const sessionDirs = new Set();
+  if (r.watcher.sessionDir) sessionDirs.add(r.watcher.sessionDir);
+  for (const h of (r.watcher.recordingHistory || [])) {
+    if (h.sessionDir) sessionDirs.add(h.sessionDir);
+  }
+
+  for (const dir of sessionDirs) {
+    const replayDir = path.join(dir, 'replays');
+    if (!fs.existsSync(replayDir)) continue;
+    try {
+      for (const name of fs.readdirSync(replayDir)) {
+        if (!name.toLowerCase().endsWith('.mp4')) continue;
+        const full = path.join(replayDir, name);
+        let stat;
+        try { stat = fs.statSync(full); } catch (e) { continue; }
+        replays.push({
+          path: full,
+          name,
+          sizeBytes: stat.size,
+          mtimeMs: stat.mtimeMs,
+        });
+      }
+    } catch (e) { /* ignore */ }
+  }
+  replays.sort((a, b) => b.mtimeMs - a.mtimeMs);
+  res.json({ replays });
+});
+
 // Unpause — will auto-record again when live detected. Also clears skipUntil
 // so a manual resume cancels any pending skip-timer.
 app.post('/api/live/resume', (req, res) => {

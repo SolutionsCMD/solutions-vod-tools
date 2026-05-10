@@ -1718,6 +1718,211 @@ refreshLive();
 setLiveRefreshRate(false);
 
 // =================================================================
+// REPLAY TAB — save the last N seconds of an active recording as a
+//              standalone clip. Shows one card per active recording
+//              + a list of recent replays at the bottom.
+// =================================================================
+const replayState = {
+  duration: 30,        // currently-selected duration in seconds (per UI)
+  busy: new Set(),     // watcher keys currently extracting (prevents double-click)
+  activeKeys: [],      // tracks which active-recording keys we've rendered
+};
+
+function renderReplayActiveList(watchers) {
+  const container = document.getElementById('replay-active-list');
+  if (!container) return;
+
+  const recording = watchers.filter(w => w.isRecording);
+  if (recording.length === 0) {
+    container.innerHTML = `
+      <div class="replay-active-card idle">
+        <div style="font-size: 16px; font-weight: 600; color: var(--text-primary); margin-bottom: 6px;">Nothing's recording right now</div>
+        <div style="font-size: var(--fs-sm); color: var(--text-tertiary);">Replays save the last few seconds of an active recording. Start a watcher in <strong>Live capture</strong> and come back here.</div>
+      </div>
+    `;
+    return;
+  }
+
+  let html = '';
+  for (const w of recording) {
+    const elapsed = w.recordingStartedAt ? formatDuration(Date.now() - w.recordingStartedAt) : '—';
+    const sizeBit = w.recordingSize ? ` · ${formatBytes(w.recordingSize)}` : '';
+    const platformAttr = `data-platform="${escapeHtmlStr(w.platform)}" data-channel="${escapeHtmlStr(w.channel)}"`;
+    const key = w.platform + ':' + w.channel;
+    const busy = replayState.busy.has(key);
+    html += `
+      <div class="replay-active-card">
+        <div class="replay-active-head">
+          <span class="platform-badge ${escapeHtmlStr(w.platform)}">${escapeHtmlStr(w.platformDisplayName || w.platform)}</span>
+          <span class="replay-active-name">${escapeHtmlStr(w.channel)}</span>
+          <span class="replay-active-meta">recording ${elapsed}${sizeBit}</span>
+        </div>
+        <div class="replay-actions">
+          <button class="replay-btn" data-action="save" ${platformAttr} ${busy ? 'disabled' : ''}>
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg>
+            ${busy ? 'Saving…' : `Save last ${replayState.duration}s`}
+          </button>
+          <div class="replay-duration-picker" role="tablist" aria-label="Replay duration">
+            <button data-duration="15" class="${replayState.duration === 15 ? 'active' : ''}">15s</button>
+            <button data-duration="30" class="${replayState.duration === 30 ? 'active' : ''}">30s</button>
+            <button data-duration="60" class="${replayState.duration === 60 ? 'active' : ''}">60s</button>
+            <button data-duration="120" class="${replayState.duration === 120 ? 'active' : ''}">2m</button>
+          </div>
+          <span class="replay-feedback" data-feedback ${platformAttr}></span>
+        </div>
+      </div>
+    `;
+  }
+  container.innerHTML = html;
+}
+
+async function refreshReplayHistory(watchers) {
+  // Aggregate replays from every recording watcher's session(s). The
+  // /api/live/replays endpoint already de-dupes across recordingHistory.
+  const list = document.getElementById('replay-history-list');
+  if (!list) return;
+  const all = [];
+  for (const w of watchers) {
+    try {
+      const res = await fetch(`/api/live/replays?platform=${encodeURIComponent(w.platform)}&channel=${encodeURIComponent(w.channel)}`);
+      const body = await res.json();
+      for (const r of (body.replays || [])) {
+        all.push({ ...r, channel: w.channel, platform: w.platform });
+      }
+    } catch (e) { /* ignore per-watcher errors */ }
+  }
+  all.sort((a, b) => b.mtimeMs - a.mtimeMs);
+
+  if (all.length === 0) {
+    list.innerHTML = `<div class="hint" style="padding: 20px 0;">No replays saved yet. Hit a button above while a recording is active.</div>`;
+    return;
+  }
+
+  let html = '';
+  for (const r of all.slice(0, 50)) {
+    const ago = formatTimeAgo ? formatTimeAgo(r.mtimeMs) : new Date(r.mtimeMs).toLocaleString();
+    const safePath = escapeHtmlStr(r.path);
+    html += `
+      <div class="replay-row">
+        <div class="replay-row-name" title="${safePath}">${escapeHtmlStr(r.name)}</div>
+        <div class="replay-row-meta">${escapeHtmlStr(r.channel)}</div>
+        <div class="replay-row-meta">${formatBytes(r.sizeBytes)}</div>
+        <div class="replay-row-meta">${escapeHtmlStr(ago)}</div>
+        <button data-action="play" data-path="${safePath}" title="Play in default player">▶ Play</button>
+      </div>
+    `;
+  }
+  list.innerHTML = html;
+}
+
+async function refreshReplayTab() {
+  // Pull the current watcher list (Live capture endpoint, already shared)
+  // so the active card list is in sync with what's actually recording.
+  try {
+    const res = await fetch('/api/live');
+    const data = await res.json();
+    const watchers = data.watchers || [];
+    renderReplayActiveList(watchers);
+    refreshReplayHistory(watchers);
+  } catch (err) {
+    const c = document.getElementById('replay-active-list');
+    if (c) c.innerHTML = `<div class="replay-active-card idle"><div style="color: var(--danger);">Failed to load: ${escapeHtmlStr(err.message)}</div></div>`;
+  }
+}
+
+async function saveReplay(platform, channel, durationSec, btn) {
+  const key = platform + ':' + channel;
+  if (replayState.busy.has(key)) return;
+  replayState.busy.add(key);
+  if (btn) {
+    btn.disabled = true;
+    btn.textContent = 'Saving…';
+  }
+  // Locate the feedback span on this card so we can show success/error inline.
+  const card = btn ? btn.closest('.replay-active-card') : null;
+  const feedback = card ? card.querySelector('[data-feedback]') : null;
+  if (feedback) { feedback.classList.remove('visible', 'error'); feedback.textContent = ''; }
+
+  try {
+    const res = await fetch('/api/live/replay', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ platform, channel, durationSec }),
+    });
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      if (feedback) {
+        feedback.classList.add('visible', 'error');
+        feedback.textContent = `Failed: ${body.error || res.status}`;
+      } else {
+        alert('Replay failed: ' + (body.error || res.status));
+      }
+      return;
+    }
+    if (feedback) {
+      feedback.classList.add('visible');
+      feedback.textContent = `Saved ${formatBytes(body.sizeBytes)} ✓`;
+      setTimeout(() => feedback.classList.remove('visible'), 4000);
+    }
+  } catch (err) {
+    if (feedback) {
+      feedback.classList.add('visible', 'error');
+      feedback.textContent = `Error: ${err.message}`;
+    }
+  } finally {
+    replayState.busy.delete(key);
+    refreshReplayTab();
+  }
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+  const activeList = document.getElementById('replay-active-list');
+  if (activeList) {
+    // Save button click + duration picker click handled with delegation since
+    // the cards are re-rendered on each refresh.
+    activeList.addEventListener('click', (e) => {
+      const durBtn = e.target.closest('.replay-duration-picker button[data-duration]');
+      if (durBtn) {
+        replayState.duration = parseInt(durBtn.dataset.duration, 10) || 30;
+        refreshReplayTab();
+        return;
+      }
+      const saveBtn = e.target.closest('.replay-btn[data-action="save"]');
+      if (saveBtn) {
+        saveReplay(saveBtn.dataset.platform, saveBtn.dataset.channel, replayState.duration, saveBtn);
+      }
+    });
+  }
+
+  const historyList = document.getElementById('replay-history-list');
+  if (historyList) {
+    historyList.addEventListener('click', (e) => {
+      const btn = e.target.closest('button[data-action="play"]');
+      if (!btn) return;
+      const filePath = btn.dataset.path;
+      if (filePath && window.electron && window.electron.libraryOpenFile) {
+        window.electron.libraryOpenFile(filePath);
+      }
+    });
+  }
+});
+
+// Reload the Replay tab when entering it, and tick periodically while it's
+// the active page so the "recording for X" timer updates without a refresh.
+let replayTickInterval = null;
+window.addEventListener('page-changed', (e) => {
+  if (!e.detail) return;
+  if (e.detail.page === 'replay') {
+    refreshReplayTab();
+    if (replayTickInterval) clearInterval(replayTickInterval);
+    replayTickInterval = setInterval(refreshReplayTab, 3000);
+  } else if (replayTickInterval) {
+    clearInterval(replayTickInterval);
+    replayTickInterval = null;
+  }
+});
+
+// =================================================================
 // LIBRARY TAB — grid view of every video in the output folder,
 //               with lazy-loaded thumbnails and a right-click menu.
 // =================================================================

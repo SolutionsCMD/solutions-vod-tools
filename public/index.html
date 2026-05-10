@@ -64,6 +64,16 @@
         <span class="nav-badge" id="badge-watchers" style="display:none;">0</span>
       </button>
 
+      <button class="nav-item" data-page="replay">
+        <span class="nav-icon">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M12 5V2L7 7l5 5V8c3.31 0 6 2.69 6 6 0 1.66-.67 3.16-1.76 4.24L18.65 19.65A8.965 8.965 0 0 0 21 14c0-4.97-4.03-9-9-9z"/>
+            <path d="M5.35 8.35A8.965 8.965 0 0 0 3 14c0 4.97 4.03 9 9 9v3l5-5-5-5v3c-3.31 0-6-2.69-6-6 0-1.66.67-3.16 1.76-4.24L5.35 8.35z"/>
+          </svg>
+        </span>
+        <span class="nav-label">Replay</span>
+      </button>
+
       <button class="nav-item" data-page="library">
         <span class="nav-icon">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -335,6 +345,25 @@
 
           <div class="result-box" id="result-cut"></div>
           <div class="log" id="log-cut"></div>
+        </div>
+      </section>
+
+      <!-- ============== PAGE: REPLAY ============== -->
+      <section class="page" id="page-replay">
+        <div class="page-header">
+          <h1 class="page-title">Replay</h1>
+          <p class="page-subtitle">Save the last few seconds of an active recording as a standalone clip — instantly. No rewind, no re-encode. Stream copy from the live file.</p>
+        </div>
+
+        <div id="replay-active-list"></div>
+
+        <div class="card" id="replay-history-card" style="margin-top: 18px;">
+          <div class="card-header">
+            <h2 class="card-title">Recent replays</h2>
+          </div>
+          <div id="replay-history-list" class="replay-history-list">
+            <div class="hint" style="padding: 20px 0;">No replays saved yet. Hit a button above while a recording is active.</div>
+          </div>
         </div>
       </section>
 
