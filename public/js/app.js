@@ -1728,6 +1728,13 @@ const replayState = {
   activeKeys: [],      // tracks which active-recording keys we've rendered
 };
 
+// Friendly format for the Save button: "30s", "1m", "5m", "10m".
+function formatReplayDuration(sec) {
+  if (sec < 60) return sec + 's';
+  if (sec % 60 === 0) return (sec / 60) + 'm';
+  return sec + 's';
+}
+
 function renderReplayActiveList(watchers) {
   const container = document.getElementById('replay-active-list');
   if (!container) return;
@@ -1760,13 +1767,15 @@ function renderReplayActiveList(watchers) {
         <div class="replay-actions">
           <button class="replay-btn" data-action="save" ${platformAttr} ${busy ? 'disabled' : ''}>
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg>
-            ${busy ? 'Saving…' : `Save last ${replayState.duration}s`}
+            ${busy ? 'Saving…' : `Save last ${formatReplayDuration(replayState.duration)}`}
           </button>
           <div class="replay-duration-picker" role="tablist" aria-label="Replay duration">
             <button data-duration="15" class="${replayState.duration === 15 ? 'active' : ''}">15s</button>
             <button data-duration="30" class="${replayState.duration === 30 ? 'active' : ''}">30s</button>
-            <button data-duration="60" class="${replayState.duration === 60 ? 'active' : ''}">60s</button>
+            <button data-duration="60" class="${replayState.duration === 60 ? 'active' : ''}">1m</button>
             <button data-duration="120" class="${replayState.duration === 120 ? 'active' : ''}">2m</button>
+            <button data-duration="300" class="${replayState.duration === 300 ? 'active' : ''}">5m</button>
+            <button data-duration="600" class="${replayState.duration === 600 ? 'active' : ''}">10m</button>
           </div>
           <span class="replay-feedback" data-feedback ${platformAttr}></span>
         </div>
