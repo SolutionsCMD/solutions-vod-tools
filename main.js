@@ -574,6 +574,29 @@ ipcMain.handle('cookies:clear', async () => {
   return { ok: true };
 });
 
+// Open a video file in the user's default player.
+ipcMain.handle('library:open-file', async (_e, filePath) => {
+  if (typeof filePath !== 'string' || !filePath) return { ok: false, error: 'invalid path' };
+  try {
+    const result = await shell.openPath(filePath);
+    if (result) return { ok: false, error: result };
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
+});
+
+// Reveal a file in Windows Explorer (selecting it).
+ipcMain.handle('library:reveal-file', async (_e, filePath) => {
+  if (typeof filePath !== 'string' || !filePath) return { ok: false, error: 'invalid path' };
+  try {
+    shell.showItemInFolder(filePath);
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
+});
+
 // File picker for the Cut tab. Defaults to the user's VODs folder so they
 // don't have to navigate from %USERPROFILE% every time.
 ipcMain.handle('files:pick-video', async () => {

@@ -481,12 +481,13 @@ function hideVodPreview() {
 
 function renderVodPreview(body) {
   const card = document.getElementById('vod-preview');
+  const thumbWrap = card?.querySelector('.vod-thumb-wrap');
   const thumb = document.getElementById('vod-thumb');
   const title = document.getElementById('vod-title');
   const uploader = document.getElementById('vod-uploader');
   const durBadge = document.getElementById('vod-duration-badge');
   const flags = document.getElementById('vod-flags');
-  if (!card || !thumb || !title || !uploader || !durBadge || !flags) return;
+  if (!card || !thumbWrap || !thumb || !title || !uploader || !durBadge || !flags) return;
 
   // Only show if we have at least a title or thumbnail to render — otherwise
   // an empty card looks broken.
@@ -495,13 +496,19 @@ function renderVodPreview(body) {
     return;
   }
 
+  // No thumbnail → hide the entire wrap (don't show a black box) and let the
+  // meta column expand to fill the card via the .no-thumb class hook.
   if (body.thumbnail) {
     thumb.src = body.thumbnail;
     thumb.style.display = '';
+    thumbWrap.style.display = '';
+    card.classList.remove('no-thumb');
   } else {
     thumb.removeAttribute('src');
-    thumb.style.display = 'none';
+    thumbWrap.style.display = 'none';
+    card.classList.add('no-thumb');
   }
+
   title.textContent = body.title || '(untitled)';
   uploader.textContent = body.uploader || '';
   uploader.style.display = body.uploader ? '' : 'none';
@@ -1709,6 +1716,278 @@ loadQualityAndSettings();
 // Initial load
 refreshLive();
 setLiveRefreshRate(false);
+
+// =================================================================
+// LIBRARY TAB — grid view of every video in the output folder,
+//               with lazy-loaded thumbnails and a right-click menu.
+// =================================================================
+const libraryState = {
+  items: [],
+  filtered: [],
+  search: '',
+  sort: 'newest',
+  ctxTarget: null, // path of the right-clicked card
+};
+
+function formatBytesShortLib(n) {
+  if (!n) return '—';
+  if (n < 1024) return n + ' B';
+  if (n < 1024 * 1024) return (n / 1024).toFixed(0) + ' KB';
+  if (n < 1024 * 1024 * 1024) return (n / 1024 / 1024).toFixed(0) + ' MB';
+  return (n / 1024 / 1024 / 1024).toFixed(2) + ' GB';
+}
+
+function libraryDateString(ms) {
+  if (!ms) return '';
+  const d = new Date(ms);
+  return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
+}
+
+function applyLibraryFilters() {
+  const term = libraryState.search.trim().toLowerCase();
+  let arr = libraryState.items;
+  if (term) {
+    arr = arr.filter(it =>
+      (it.title || '').toLowerCase().includes(term) ||
+      (it.filename || '').toLowerCase().includes(term) ||
+      (it.subtitle || '').toLowerCase().includes(term)
+    );
+  }
+  switch (libraryState.sort) {
+    case 'newest':   arr = arr.slice().sort((a, b) => b.mtimeMs - a.mtimeMs); break;
+    case 'oldest':   arr = arr.slice().sort((a, b) => a.mtimeMs - b.mtimeMs); break;
+    case 'largest':  arr = arr.slice().sort((a, b) => b.sizeBytes - a.sizeBytes); break;
+    case 'smallest': arr = arr.slice().sort((a, b) => a.sizeBytes - b.sizeBytes); break;
+    case 'title':    arr = arr.slice().sort((a, b) => (a.title || '').localeCompare(b.title || '')); break;
+  }
+  libraryState.filtered = arr;
+  renderLibraryGrid();
+}
+
+function escapeHtmlSimple(s) {
+  return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+function renderLibraryGrid() {
+  const grid = document.getElementById('library-grid');
+  const empty = document.getElementById('library-empty');
+  const count = document.getElementById('library-count');
+  if (!grid || !empty || !count) return;
+
+  const items = libraryState.filtered;
+  count.textContent = items.length === libraryState.items.length
+    ? `${items.length} video${items.length === 1 ? '' : 's'}`
+    : `${items.length} of ${libraryState.items.length}`;
+
+  if (items.length === 0) {
+    grid.innerHTML = '';
+    empty.hidden = libraryState.items.length === 0 ? false : true;
+    if (libraryState.items.length > 0 && libraryState.search) {
+      // We have items, but the search filtered them all out — show an empty
+      // state inline rather than the "no videos yet" message.
+      empty.hidden = false;
+      empty.querySelector('.library-empty-title').textContent = 'No matches';
+      empty.querySelector('.library-empty-hint').textContent = `Nothing matches "${libraryState.search}".`;
+    } else {
+      empty.querySelector('.library-empty-title').textContent = 'No videos yet';
+      empty.querySelector('.library-empty-hint').textContent = "Your output folder is empty. Download or record something and it'll show up here.";
+    }
+    return;
+  }
+  empty.hidden = true;
+
+  // Build cards. We don't include thumbnails inline — IntersectionObserver
+  // populates them lazily so a 500-video library doesn't fire 500 ffmpeg
+  // probes on first render.
+  let html = '';
+  for (const it of items) {
+    const platformClass = it.platform ? `library-card-platform ${escapeHtmlSimple(it.platform)}` : 'library-card-platform';
+    const platformLabel = it.platform || '';
+    html += `
+      <div class="library-card" data-path="${escapeHtmlSimple(it.path)}">
+        <div class="library-card-thumb" data-thumb-path="${escapeHtmlSimple(it.path)}">
+          <div class="library-card-thumb-placeholder">loading…</div>
+          ${platformLabel ? `<span class="${platformClass}">${escapeHtmlSimple(platformLabel)}</span>` : ''}
+          <span class="library-card-size">${formatBytesShortLib(it.sizeBytes)}</span>
+        </div>
+        <div class="library-card-body">
+          <div class="library-card-title">${escapeHtmlSimple(it.title || it.filename)}</div>
+          ${it.subtitle ? `<div class="library-card-subtitle">${escapeHtmlSimple(it.subtitle)}</div>` : ''}
+          <div class="library-card-meta">${libraryDateString(it.mtimeMs)}</div>
+        </div>
+      </div>
+    `;
+  }
+  grid.innerHTML = html;
+  observeLibraryThumbs();
+}
+
+// IntersectionObserver: load thumbnails only as cards scroll into view.
+let libraryThumbObserver = null;
+function observeLibraryThumbs() {
+  if (libraryThumbObserver) libraryThumbObserver.disconnect();
+  libraryThumbObserver = new IntersectionObserver((entries) => {
+    for (const entry of entries) {
+      if (!entry.isIntersecting) continue;
+      const wrap = entry.target;
+      libraryThumbObserver.unobserve(wrap);
+      const filePath = wrap.dataset.thumbPath;
+      if (!filePath) continue;
+      const img = new Image();
+      img.onload = () => {
+        // Replace the placeholder with the real image.
+        const placeholder = wrap.querySelector('.library-card-thumb-placeholder');
+        if (placeholder) placeholder.remove();
+        wrap.insertBefore(img, wrap.firstChild);
+      };
+      img.onerror = () => {
+        // Leave the "loading…" placeholder text in place but make it say
+        // "no preview" so the user knows generation failed (e.g. file gone,
+        // codec ffmpeg can't read).
+        const placeholder = wrap.querySelector('.library-card-thumb-placeholder');
+        if (placeholder) placeholder.textContent = 'no preview';
+      };
+      img.src = '/api/library/thumbnail?path=' + encodeURIComponent(filePath);
+    }
+  }, { rootMargin: '200px 0px' });
+
+  document.querySelectorAll('.library-card-thumb[data-thumb-path]').forEach(el => {
+    libraryThumbObserver.observe(el);
+  });
+}
+
+async function loadLibrary() {
+  const grid = document.getElementById('library-grid');
+  if (!grid) return;
+  grid.innerHTML = '<div class="library-empty-hint" style="padding: 24px;">Scanning…</div>';
+  try {
+    const res = await fetch('/api/library/list');
+    const body = await res.json();
+    libraryState.items = body.items || [];
+  } catch (err) {
+    grid.innerHTML = `<div class="library-empty-hint" style="padding: 24px; color: var(--danger);">Failed to load: ${err.message}</div>`;
+    return;
+  }
+  applyLibraryFilters();
+}
+
+// Right-click context menu plumbing.
+function showLibraryCtx(x, y, filePath) {
+  const ctx = document.getElementById('library-ctx');
+  if (!ctx) return;
+  libraryState.ctxTarget = filePath;
+  ctx.hidden = false;
+  // Position, then constrain to viewport so it doesn't clip off screen.
+  ctx.style.left = x + 'px';
+  ctx.style.top = y + 'px';
+  const rect = ctx.getBoundingClientRect();
+  if (rect.right > window.innerWidth)  ctx.style.left = (window.innerWidth - rect.width - 4) + 'px';
+  if (rect.bottom > window.innerHeight) ctx.style.top = (window.innerHeight - rect.height - 4) + 'px';
+}
+function hideLibraryCtx() {
+  const ctx = document.getElementById('library-ctx');
+  if (ctx) ctx.hidden = true;
+  libraryState.ctxTarget = null;
+}
+
+async function libraryAction(action, filePath) {
+  if (!filePath) return;
+  if (action === 'play') {
+    if (window.electron && window.electron.libraryOpenFile) {
+      const r = await window.electron.libraryOpenFile(filePath);
+      if (!r.ok) alert('Open failed: ' + (r.error || 'unknown'));
+    }
+  } else if (action === 'reveal') {
+    if (window.electron && window.electron.libraryRevealFile) {
+      await window.electron.libraryRevealFile(filePath);
+    }
+  } else if (action === 'cut') {
+    // Switch to Cut tab and pre-load the file.
+    const cutNav = document.querySelector('.nav-item[data-page="cut"]');
+    if (cutNav) cutNav.click();
+    setTimeout(() => loadCutTabFile(filePath), 50);
+  } else if (action === 'delete') {
+    if (!confirm(`Delete this video and its companion files?\n\n${filePath}\n\nThis can't be undone.`)) return;
+    try {
+      const res = await fetch('/api/library/delete', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ path: filePath }),
+      });
+      const body = await res.json();
+      if (!res.ok) {
+        alert('Delete failed: ' + (body.error || res.status));
+      }
+    } catch (err) {
+      alert('Delete error: ' + err.message);
+    }
+    loadLibrary();
+  }
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+  const refreshBtn = document.getElementById('btn-library-refresh');
+  if (refreshBtn) refreshBtn.addEventListener('click', loadLibrary);
+
+  const search = document.getElementById('library-search');
+  if (search) {
+    search.addEventListener('input', () => {
+      libraryState.search = search.value;
+      applyLibraryFilters();
+    });
+  }
+  const sort = document.getElementById('library-sort');
+  if (sort) {
+    sort.addEventListener('change', () => {
+      libraryState.sort = sort.value;
+      applyLibraryFilters();
+    });
+  }
+
+  // Click on a card → play. Right-click → context menu.
+  const grid = document.getElementById('library-grid');
+  if (grid) {
+    grid.addEventListener('click', (e) => {
+      const card = e.target.closest('.library-card');
+      if (!card) return;
+      libraryAction('play', card.dataset.path);
+    });
+    grid.addEventListener('contextmenu', (e) => {
+      const card = e.target.closest('.library-card');
+      if (!card) return;
+      e.preventDefault();
+      showLibraryCtx(e.clientX, e.clientY, card.dataset.path);
+    });
+  }
+
+  // Context menu item click + global dismiss handlers.
+  const ctx = document.getElementById('library-ctx');
+  if (ctx) {
+    ctx.addEventListener('click', (e) => {
+      const btn = e.target.closest('.library-ctx-item');
+      if (!btn) return;
+      const action = btn.dataset.action;
+      const filePath = libraryState.ctxTarget;
+      hideLibraryCtx();
+      libraryAction(action, filePath);
+    });
+  }
+  document.addEventListener('click', (e) => {
+    if (!e.target.closest('.library-ctx')) hideLibraryCtx();
+  });
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') hideLibraryCtx();
+  });
+  window.addEventListener('blur', hideLibraryCtx);
+});
+
+// Reload the library each time the user navigates to the Library tab so it
+// reflects fresh recordings without needing a manual refresh.
+window.addEventListener('page-changed', (e) => {
+  if (e.detail && e.detail.page === 'library') {
+    loadLibrary();
+  }
+});
 
 // =================================================================
 // CUT TAB — pick a local video, dual-handle slider, ffmpeg trim

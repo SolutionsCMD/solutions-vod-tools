@@ -25,4 +25,8 @@ contextBridge.exposeInMainWorld('electron', {
 
   // File picker for Cut tab — returns absolute path or null if canceled
   pickVideoFile:         () => ipcRenderer.invoke('files:pick-video'),
+
+  // Library tab actions
+  libraryOpenFile:       (path) => ipcRenderer.invoke('library:open-file', path),
+  libraryRevealFile:     (path) => ipcRenderer.invoke('library:reveal-file', path),
 });

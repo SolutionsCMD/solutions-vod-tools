@@ -568,6 +568,215 @@ app.get('/api/probe', async (req, res) => {
   });
 });
 
+// -------- Library: scan + thumbnail cache (Library tab) --------
+// Walks DEFAULT_OUTPUT recursively for video files, returns each one with
+// metadata pulled from the companion info.json when present (recording
+// sessions write a session-level info.json; VOD downloads write a per-video
+// `<base>.info.json`). Thumbnails are generated on demand by ffmpeg and
+// cached under userData so the grid renders instantly on subsequent loads.
+
+const VIDEO_EXTENSIONS = new Set(['.mp4', '.mkv', '.webm', '.mov', '.avi', '.flv', '.ts', '.m4v']);
+const THUMB_CACHE_DIR = path.join(CACHE_DIR_FOR_THUMBS(), 'thumbs');
+function CACHE_DIR_FOR_THUMBS() {
+  // Reuse the binDir parent (userData) since BIN_DIR is one level under it.
+  // This keeps the cache out of the user's video output folder.
+  return path.dirname(BIN_DIR);
+}
+if (!fs.existsSync(THUMB_CACHE_DIR)) fs.mkdirSync(THUMB_CACHE_DIR, { recursive: true });
+
+function thumbCachePath(filePath, mtimeMs) {
+  // Hash the absolute path + mtime so renamed/edited videos get fresh
+  // thumbnails. Short hash is fine — the chance of collision in a single
+  // user's library is effectively zero.
+  const h = crypto.createHash('sha1');
+  h.update(filePath);
+  h.update(':');
+  h.update(String(Math.round(mtimeMs)));
+  return path.join(THUMB_CACHE_DIR, h.digest('hex') + '.jpg');
+}
+
+// Read companion info.json if present. Returns the raw parsed object, or null.
+// Two flavors we need to handle:
+//   - Recording sessions: <sessionDir>/info.json (one for the whole session)
+//   - VOD downloads:      <base>.info.json (yt-dlp's --write-info-json output)
+function readCompanionInfo(videoPath) {
+  const dir = path.dirname(videoPath);
+  const ext = path.extname(videoPath);
+  const base = path.basename(videoPath, ext);
+
+  const candidates = [
+    path.join(dir, base + '.info.json'),  // yt-dlp companion
+    path.join(dir, 'info.json'),          // recording session
+  ];
+  for (const c of candidates) {
+    if (fs.existsSync(c)) {
+      try {
+        return { path: c, data: JSON.parse(fs.readFileSync(c, 'utf8')) };
+      } catch (e) { /* ignore malformed */ }
+    }
+  }
+  return null;
+}
+
+function deriveDisplayTitle(videoPath, info) {
+  if (info && info.data) {
+    if (typeof info.data.title === 'string' && info.data.title) return info.data.title;
+    if (typeof info.data.initialTitle === 'string' && info.data.initialTitle) return info.data.initialTitle;
+    if (typeof info.data.channel === 'string' && info.data.channel) return info.data.channel;
+  }
+  return path.basename(videoPath, path.extname(videoPath));
+}
+
+function deriveSubtitle(info) {
+  if (!info || !info.data) return null;
+  const d = info.data;
+  if (d.uploader) return d.uploader;
+  if (d.channel && d.platform) return `${d.platform} · ${d.channel}`;
+  if (d.channel) return d.channel;
+  if (d.platform) return d.platform;
+  return null;
+}
+
+app.get('/api/library/list', (req, res) => {
+  const items = [];
+  const root = DEFAULT_OUTPUT;
+  if (!fs.existsSync(root)) return res.json({ items, root });
+
+  // Recursive walk capped at depth 4 to keep large folder trees responsive.
+  const stack = [{ dir: root, depth: 0 }];
+  while (stack.length) {
+    const { dir, depth } = stack.pop();
+    let entries;
+    try { entries = fs.readdirSync(dir, { withFileTypes: true }); }
+    catch (e) { continue; }
+    for (const e of entries) {
+      const full = path.join(dir, e.name);
+      if (e.isDirectory()) {
+        if (depth < 4) stack.push({ dir: full, depth: depth + 1 });
+        continue;
+      }
+      const ext = path.extname(e.name).toLowerCase();
+      if (!VIDEO_EXTENSIONS.has(ext)) continue;
+      let stat;
+      try { stat = fs.statSync(full); } catch (err) { continue; }
+      const info = readCompanionInfo(full);
+      items.push({
+        path: full,
+        filename: e.name,
+        relPath: path.relative(root, full),
+        sizeBytes: stat.size,
+        mtimeMs: stat.mtimeMs,
+        title: deriveDisplayTitle(full, info),
+        subtitle: deriveSubtitle(info),
+        platform: info?.data?.platform || null,
+        recordingStartedAt: info?.data?.recordingStartedAt || null,
+        hasInfoJson: !!info,
+      });
+    }
+  }
+  // Newest first.
+  items.sort((a, b) => b.mtimeMs - a.mtimeMs);
+  res.json({ items, root });
+});
+
+// Generate (and cache) a thumbnail for one video. Uses ffmpeg to seek into
+// the file and grab a 320×180 JPEG. Subsequent calls hit the cache.
+app.get('/api/library/thumbnail', async (req, res) => {
+  const filePath = (req.query.path || '').trim();
+  if (!filePath) return res.status(400).json({ error: 'path required' });
+  if (!fs.existsSync(filePath)) return res.status(404).json({ error: 'file not found' });
+  let stat;
+  try { stat = fs.statSync(filePath); } catch (e) { return res.status(404).json({ error: 'stat failed' }); }
+
+  const cached = thumbCachePath(filePath, stat.mtimeMs);
+  if (fs.existsSync(cached)) {
+    res.setHeader('Content-Type', 'image/jpeg');
+    res.setHeader('Cache-Control', 'public, max-age=86400');
+    return fs.createReadStream(cached).pipe(res);
+  }
+
+  // Seek 30s in (or 5% of duration if shorter) so the frame isn't a black
+  // intro slate. Doing the seek before -i means container-level seek (fast).
+  // The padding filter keeps aspect ratio without weird stretches.
+  const seekSec = stat.size > 50 * 1024 * 1024 ? 30 : 5;
+  const args = [
+    '-ss', String(seekSec),
+    '-i', filePath,
+    '-frames:v', '1',
+    '-vf', 'scale=320:-2:force_original_aspect_ratio=decrease',
+    '-q:v', '4',
+    '-y', cached,
+  ];
+
+  const proc = spawn(FFMPEG, args, { windowsHide: true });
+  let stderr = '';
+  proc.stderr.on('data', d => { stderr += d.toString(); });
+
+  const timer = setTimeout(() => {
+    try { proc.kill('SIGKILL'); } catch (e) {}
+  }, 15000);
+
+  proc.on('close', code => {
+    clearTimeout(timer);
+    if (code !== 0 || !fs.existsSync(cached)) {
+      // Don't poison the response with a 502 page — the UI fallback handles
+      // missing thumbnails gracefully via onerror.
+      return res.status(500).json({ error: 'thumbnail generation failed', detail: stderr.trim().slice(-200) });
+    }
+    res.setHeader('Content-Type', 'image/jpeg');
+    res.setHeader('Cache-Control', 'public, max-age=86400');
+    fs.createReadStream(cached).pipe(res);
+  });
+  proc.on('error', err => {
+    clearTimeout(timer);
+    res.status(500).json({ error: err.message });
+  });
+});
+
+// Delete a video file (and best-effort its companion files: info.json,
+// titles.log, chat.jsonl/.log, .live_chat.json, .description, etc.). Only
+// targets files inside DEFAULT_OUTPUT so a buggy UI can't nuke arbitrary
+// disk paths.
+app.post('/api/library/delete', (req, res) => {
+  const filePath = (req.body && req.body.path || '').trim();
+  if (!filePath) return res.status(400).json({ error: 'path required' });
+  // Safety: reject anything outside DEFAULT_OUTPUT.
+  const resolved = path.resolve(filePath);
+  const root = path.resolve(DEFAULT_OUTPUT);
+  if (!resolved.startsWith(root + path.sep) && resolved !== root) {
+    return res.status(400).json({ error: 'path is outside the configured VODs folder' });
+  }
+  if (!fs.existsSync(resolved)) return res.status(404).json({ error: 'file not found' });
+
+  const dir = path.dirname(resolved);
+  const ext = path.extname(resolved);
+  const base = path.basename(resolved, ext);
+  const deleted = [];
+  const failed = [];
+
+  // Companion files we'll sweep up too. The list is generous; we just check
+  // existence before unlinking.
+  const companions = [
+    path.join(dir, base + '.info.json'),
+    path.join(dir, base + '.live_chat.json'),
+    path.join(dir, base + '.description'),
+    path.join(dir, base + '.en.vtt'),
+  ];
+
+  // Always delete the main file last so we don't lose the anchor for the
+  // safety check above mid-loop.
+  for (const c of companions) {
+    if (fs.existsSync(c)) {
+      try { fs.unlinkSync(c); deleted.push(path.basename(c)); }
+      catch (e) { failed.push({ name: path.basename(c), error: e.message }); }
+    }
+  }
+  try { fs.unlinkSync(resolved); deleted.push(path.basename(resolved)); }
+  catch (e) { failed.push({ name: path.basename(resolved), error: e.message }); }
+
+  res.json({ deleted, failed });
+});
+
 // -------- Probe a LOCAL video file for duration (used by the Cut tab) --------
 // Uses ffprobe (bundled with ffmpeg). Returns duration in seconds plus a few
 // other useful bits. Cheap — runs in <1s for any reasonable video.
