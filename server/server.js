@@ -153,11 +153,14 @@ app.post('/api/download', async (req, res) => {
     writeLine(res, `[info] Chat replay: skipped (no VOD chat endpoint for Kick)`);
   }
 
+  // NOTE: We deliberately do NOT pass --download-sections to yt-dlp anymore.
+  // Sectioned HLS downloads are flaky across sites — the symptom is yt-dlp
+  // writing info.json then never actually transferring bytes. Instead we
+  // download the full VOD here and run an ffmpeg stream-copy trim as a
+  // post-step (see "post-download trim" below). Slower for big VODs but
+  // reliable everywhere yt-dlp can fetch the full source.
   if (hasSection) {
-    const startStr = start || '0';
-    const endStr = end || 'inf';
-    ytArgs.push('--download-sections', `*${startStr}-${endStr}`);
-    writeLine(res, `[info] Section: ${startStr} to ${endStr} (partial download)`);
+    writeLine(res, `[info] Trim queued: ${start || '0:00:00'} → ${end || 'end'} (applied after download)`);
   }
 
   // Cookies for age-gated / login-walled content. The user imports a
@@ -242,6 +245,49 @@ app.post('/api/download', async (req, res) => {
     writeLine(res, `\n[warn] Could not determine downloaded file path.`);
   } else {
     writeLine(res, `\n[file] ${finalFilePath}`);
+  }
+
+  // Post-download trim: if the user set start/end, run ffmpeg with stream
+  // copy on the finished file. -c copy is fast (no re-encode) but seeks to
+  // the nearest preceding keyframe — close enough for stream-archival use.
+  if (hasSection && finalFilePath && fs.existsSync(finalFilePath)) {
+    writeLine(res, `\n[status] trimming`);
+    const trimDir = path.dirname(finalFilePath);
+    const ext = path.extname(finalFilePath);
+    const base = path.basename(finalFilePath, ext);
+    const trimmedPath = path.join(trimDir, `${base} - TRIMMED${ext}`);
+
+    const ffArgs = ['-y', '-i', finalFilePath, '-ss', start || '00:00:00'];
+    if (end) ffArgs.push('-to', end);
+    ffArgs.push('-c', 'copy', '-avoid_negative_ts', 'make_zero', trimmedPath);
+
+    writeLine(res, `[info] Trimming to: ${trimmedPath}`);
+    writeLine(res, `[cmd] ${path.basename(FFMPEG)} ${ffArgs.map(a => a.includes(' ') ? `"${a}"` : a).join(' ')}`);
+
+    const ff = spawn(FFMPEG, ffArgs, { windowsHide: true });
+    runningJobs.set(jobId + '_trim', ff);
+
+    try {
+      await streamProcess(ff, res, 'ffmpeg');
+      runningJobs.delete(jobId + '_trim');
+
+      // Replace the full download with the trimmed file (this is what the
+      // user asked for — they don't want the giant untrimmed copy hanging
+      // around). If something goes wrong with the rename, we keep both.
+      try {
+        fs.unlinkSync(finalFilePath);
+        fs.renameSync(trimmedPath, finalFilePath);
+        writeLine(res, `[info] Trim applied; original full-length file removed.`);
+      } catch (renameErr) {
+        writeLine(res, `[warn] Trim succeeded but couldn't replace original: ${renameErr.message}`);
+        writeLine(res, `[file] Trimmed copy: ${trimmedPath}`);
+        finalFilePath = trimmedPath;
+      }
+    } catch (trimErr) {
+      runningJobs.delete(jobId + '_trim');
+      writeLine(res, `[warn] Trim failed: ${trimErr.message}`);
+      writeLine(res, `[info] Original full-length download kept at: ${finalFilePath}`);
+    }
   }
 
   // Normalize VOD chat into chat.jsonl alongside the video.
@@ -514,6 +560,58 @@ app.get('/api/probe', async (req, res) => {
       thumbnail: info.thumbnail || null,
       isLive: !!info.is_live,
       wasLive: !!info.was_live,
+    });
+  });
+  proc.on('error', err => {
+    clearTimeout(timer);
+    res.status(500).json({ error: err.message });
+  });
+});
+
+// -------- Probe a LOCAL video file for duration (used by the Cut tab) --------
+// Uses ffprobe (bundled with ffmpeg). Returns duration in seconds plus a few
+// other useful bits. Cheap — runs in <1s for any reasonable video.
+app.get('/api/probe-file', async (req, res) => {
+  const filePath = (req.query.path || '').trim();
+  if (!filePath) return res.status(400).json({ error: 'path required' });
+  if (!fs.existsSync(filePath)) return res.status(404).json({ error: 'File not found' });
+
+  const args = [
+    '-v', 'error',
+    '-print_format', 'json',
+    '-show_format',
+    '-show_streams',
+    filePath,
+  ];
+
+  const proc = spawn(FFPROBE, args, { windowsHide: true });
+  let out = '', err = '';
+  proc.stdout.on('data', d => { out += d.toString(); });
+  proc.stderr.on('data', d => { err += d.toString(); });
+
+  const timer = setTimeout(() => {
+    try { proc.kill('SIGTERM'); } catch (e) {}
+  }, 10000);
+
+  proc.on('close', code => {
+    clearTimeout(timer);
+    if (code !== 0) {
+      return res.status(502).json({ error: 'ffprobe failed', detail: err.trim().slice(-300) });
+    }
+    let info;
+    try { info = JSON.parse(out); }
+    catch (e) { return res.status(502).json({ error: 'ffprobe returned non-JSON' }); }
+
+    const fmt = info.format || {};
+    const videoStream = (info.streams || []).find(s => s.codec_type === 'video') || {};
+    res.json({
+      path: filePath,
+      filename: path.basename(filePath),
+      durationSec: parseFloat(fmt.duration) || 0,
+      sizeBytes: parseInt(fmt.size, 10) || 0,
+      width: videoStream.width || null,
+      height: videoStream.height || null,
+      videoCodec: videoStream.codec_name || null,
     });
   });
   proc.on('error', err => {

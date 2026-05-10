@@ -22,4 +22,7 @@ contextBridge.exposeInMainWorld('electron', {
   cookiesImport:         () => ipcRenderer.invoke('cookies:import'),
   cookiesStatus:         () => ipcRenderer.invoke('cookies:status'),
   cookiesClear:          () => ipcRenderer.invoke('cookies:clear'),
+
+  // File picker for Cut tab — returns absolute path or null if canceled
+  pickVideoFile:         () => ipcRenderer.invoke('files:pick-video'),
 });

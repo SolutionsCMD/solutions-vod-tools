@@ -574,6 +574,24 @@ ipcMain.handle('cookies:clear', async () => {
   return { ok: true };
 });
 
+// File picker for the Cut tab. Defaults to the user's VODs folder so they
+// don't have to navigate from %USERPROFILE% every time.
+ipcMain.handle('files:pick-video', async () => {
+  const result = await dialog.showOpenDialog(mainWindow || null, {
+    title: 'Pick a video to cut',
+    defaultPath: outputDir,
+    properties: ['openFile'],
+    filters: [
+      { name: 'Video', extensions: ['mp4', 'mkv', 'webm', 'mov', 'avi', 'flv', 'ts', 'm4v'] },
+      { name: 'All files', extensions: ['*'] },
+    ],
+  });
+  if (result.canceled || !result.filePaths || result.filePaths.length === 0) {
+    return null;
+  }
+  return result.filePaths[0];
+});
+
 // -------- Lifecycle --------
 app.on('second-instance', showMainWindow);
 

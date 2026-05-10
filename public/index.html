@@ -47,7 +47,7 @@
             <line x1="12" y1="15" x2="12" y2="3"/>
           </svg>
         </span>
-        <span class="nav-label">Download &amp; cut</span>
+        <span class="nav-label">Download</span>
       </button>
 
       <button class="nav-item" data-page="live">
@@ -62,6 +62,19 @@
         </span>
         <span class="nav-label">Live capture</span>
         <span class="nav-badge" id="badge-watchers" style="display:none;">0</span>
+      </button>
+
+      <button class="nav-item" data-page="cut">
+        <span class="nav-icon">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="6" cy="6" r="3"/>
+            <circle cx="6" cy="18" r="3"/>
+            <line x1="20" y1="4" x2="8.12" y2="15.88"/>
+            <line x1="14.47" y1="14.48" x2="20" y2="20"/>
+            <line x1="8.12" y1="8.12" x2="12" y2="12"/>
+          </svg>
+        </span>
+        <span class="nav-label">Cut video</span>
       </button>
 
       <button class="nav-item" data-page="stitch">
@@ -124,8 +137,8 @@
       <!-- ============== PAGE: DOWNLOAD ============== -->
       <section class="page active" id="page-download">
         <div class="page-header">
-          <h1 class="page-title">Download &amp; cut</h1>
-          <p class="page-subtitle">Grab a VOD from Kick, Twitch, or YouTube. Drag the slider or use the chips to trim during the download — no waiting for a re-encode after.</p>
+          <h1 class="page-title">Download</h1>
+          <p class="page-subtitle">Grab a VOD from Kick, Twitch, or YouTube. Drag the slider to trim — the app downloads the full source, then ffmpeg-trims at the end (stream copy, no re-encode).</p>
         </div>
 
         <div class="card">
@@ -310,6 +323,62 @@
 
           <div class="result-box" id="result-cut"></div>
           <div class="log" id="log-cut"></div>
+        </div>
+      </section>
+
+      <!-- ============== PAGE: CUT VIDEO ============== -->
+      <section class="page" id="page-cut">
+        <div class="page-header">
+          <h1 class="page-title">Cut video</h1>
+          <p class="page-subtitle">Trim any local video file losslessly. Pick a file, drag the handles, hit Cut — ffmpeg stream-copies the selected range so it's fast and no quality is lost.</p>
+        </div>
+
+        <div class="card">
+          <div class="field">
+            <label class="label">Source file</label>
+            <div class="cut-pick-row">
+              <input type="text" id="cut-tab-file-path" placeholder="Click Browse to pick a video..." readonly>
+              <button class="btn" id="btn-cut-tab-pick" type="button">Browse…</button>
+            </div>
+            <div class="hint" id="cut-tab-file-meta" style="margin-top: 6px; min-height: 18px;"></div>
+          </div>
+
+          <div class="field" id="cut-tab-trim-section" style="display: none;">
+            <label class="label">Trim range</label>
+            <div class="trim-slider-wrap">
+              <div class="trim-track" id="cut-tab-track">
+                <div class="trim-fill" id="cut-tab-fill"></div>
+                <input type="range" id="cut-tab-start-slider" min="0" max="0" value="0" step="1">
+                <input type="range" id="cut-tab-end-slider" min="0" max="0" value="0" step="1">
+              </div>
+              <div class="trim-readouts">
+                <div>
+                  <label class="label" for="cut-tab-start">Start</label>
+                  <input type="text" id="cut-tab-start" placeholder="0:00:00 or 5m" autocomplete="off">
+                </div>
+                <div class="trim-duration-display" id="cut-tab-duration-display">—</div>
+                <div>
+                  <label class="label" for="cut-tab-end">End</label>
+                  <input type="text" id="cut-tab-end" placeholder="leave blank for end" autocomplete="off">
+                </div>
+              </div>
+            </div>
+            <div class="hint" style="margin-top: 6px;">Inputs accept <code>HH:MM:SS</code>, <code>5m</code>, <code>1h30m</code>, or plain seconds. Drag the slider for visual seek.</div>
+          </div>
+
+          <label style="display: flex; align-items: center; gap: 8px; padding: 12px 0 0; color: var(--text-secondary); font-size: var(--fs-sm); cursor: pointer;">
+            <input type="checkbox" id="cut-tab-keep-original" checked>
+            Keep the original file after cutting
+          </label>
+
+          <div class="btn-row" style="margin-top: 18px;">
+            <button class="btn btn-primary" id="btn-start-cut-tab" disabled>Cut (lossless)</button>
+            <button class="btn btn-danger" id="btn-cancel-cut-tab" disabled>Cancel</button>
+            <span class="status-pill" id="status-cut-tab">idle</span>
+          </div>
+
+          <div class="result-box" id="result-cut-tab"></div>
+          <div class="log" id="log-cut-tab"></div>
         </div>
       </section>
 

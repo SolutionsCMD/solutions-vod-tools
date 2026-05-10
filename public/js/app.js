@@ -252,7 +252,10 @@ function stopElapsed(tab) {
 }
 
 function resetStatsCard(tab) {
-  document.getElementById('stats-' + tab).classList.add('visible');
+  // Stats card is optional — tabs that don't show one (e.g. cut-tab) won't
+  // have these elements. Null-check everything.
+  const stats = document.getElementById('stats-' + tab);
+  if (stats) stats.classList.add('visible');
   const pct = document.getElementById('percent-' + tab);
   if (pct) pct.textContent = tab === 'stitch' ? '—' : '0.0%';
   const bar = document.getElementById('bar-' + tab);
@@ -1706,5 +1709,150 @@ loadQualityAndSettings();
 // Initial load
 refreshLive();
 setLiveRefreshRate(false);
+
+// =================================================================
+// CUT TAB — pick a local video, dual-handle slider, ffmpeg trim
+// =================================================================
+//
+// State for the Cut tab. Independent from the Download trim picker so they
+// can both be used without stepping on each other.
+const cutTabState = {
+  filePath: null,
+  durationSec: 0,
+};
+
+function setCutTabSliderEnabled(enabled) {
+  const start = document.getElementById('cut-tab-start-slider');
+  const end = document.getElementById('cut-tab-end-slider');
+  if (start) start.disabled = !enabled;
+  if (end) end.disabled = !enabled;
+  const btn = document.getElementById('btn-start-cut-tab');
+  if (btn) btn.disabled = !enabled;
+}
+
+function updateCutTabFill() {
+  const start = document.getElementById('cut-tab-start-slider');
+  const end = document.getElementById('cut-tab-end-slider');
+  const fill = document.getElementById('cut-tab-fill');
+  if (!start || !end || !fill) return;
+  const max = parseInt(start.max, 10) || 1;
+  const a = Math.min(parseInt(start.value, 10) || 0, parseInt(end.value, 10) || max);
+  const b = Math.max(parseInt(start.value, 10) || 0, parseInt(end.value, 10) || max);
+  fill.style.left = `${(a / max) * 100}%`;
+  fill.style.right = `${100 - (b / max) * 100}%`;
+}
+
+function syncCutTabSlidersFromInputs() {
+  if (cutTabState.durationSec <= 0) return;
+  const startSec = parseTimeInput(document.getElementById('cut-tab-start').value);
+  const endSec = parseTimeInput(document.getElementById('cut-tab-end').value);
+  const startSlider = document.getElementById('cut-tab-start-slider');
+  const endSlider = document.getElementById('cut-tab-end-slider');
+  if (startSlider) startSlider.value = startSec != null ? Math.min(startSec, cutTabState.durationSec) : 0;
+  if (endSlider)   endSlider.value   = endSec   != null ? Math.min(endSec,   cutTabState.durationSec) : cutTabState.durationSec;
+  updateCutTabFill();
+}
+
+function syncCutTabInputsFromSliders() {
+  const startSlider = document.getElementById('cut-tab-start-slider');
+  const endSlider = document.getElementById('cut-tab-end-slider');
+  if (!startSlider || !endSlider) return;
+  let a = parseInt(startSlider.value, 10) || 0;
+  let b = parseInt(endSlider.value, 10) || cutTabState.durationSec;
+  // Keep handles ordered so the user can't drag start past end.
+  if (a > b) { const t = a; a = b; b = t; startSlider.value = a; endSlider.value = b; }
+  document.getElementById('cut-tab-start').value = a > 0 ? secondsToHms(a) : '';
+  document.getElementById('cut-tab-end').value   = b < cutTabState.durationSec ? secondsToHms(b) : '';
+  updateCutTabFill();
+}
+
+async function loadCutTabFile(filePath) {
+  cutTabState.filePath = filePath;
+  cutTabState.durationSec = 0;
+  document.getElementById('cut-tab-file-path').value = filePath;
+  document.getElementById('cut-tab-file-meta').textContent = 'Probing…';
+  document.getElementById('cut-tab-trim-section').style.display = 'none';
+  setCutTabSliderEnabled(false);
+
+  try {
+    const res = await fetch('/api/probe-file?path=' + encodeURIComponent(filePath));
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      document.getElementById('cut-tab-file-meta').textContent = `Probe failed: ${body.error || res.status}`;
+      return;
+    }
+    cutTabState.durationSec = body.durationSec || 0;
+    const meta = [];
+    if (body.durationSec)               meta.push(secondsToHms(Math.round(body.durationSec)));
+    if (body.width && body.height)      meta.push(`${body.width}×${body.height}`);
+    if (body.videoCodec)                meta.push(body.videoCodec);
+    if (body.sizeBytes)                 meta.push(formatBytes(body.sizeBytes));
+    document.getElementById('cut-tab-file-meta').textContent = meta.join(' · ') || 'Loaded.';
+
+    if (cutTabState.durationSec > 0) {
+      const startSlider = document.getElementById('cut-tab-start-slider');
+      const endSlider = document.getElementById('cut-tab-end-slider');
+      startSlider.max = cutTabState.durationSec;
+      startSlider.value = 0;
+      endSlider.max = cutTabState.durationSec;
+      endSlider.value = cutTabState.durationSec;
+      document.getElementById('cut-tab-start').value = '';
+      document.getElementById('cut-tab-end').value = '';
+      document.getElementById('cut-tab-duration-display').textContent = `total ${secondsToHms(Math.round(cutTabState.durationSec))}`;
+      document.getElementById('cut-tab-trim-section').style.display = '';
+      setCutTabSliderEnabled(true);
+      updateCutTabFill();
+    }
+  } catch (err) {
+    document.getElementById('cut-tab-file-meta').textContent = `Probe error: ${err.message}`;
+  }
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+  const pickBtn = document.getElementById('btn-cut-tab-pick');
+  if (pickBtn) {
+    pickBtn.addEventListener('click', async () => {
+      if (!window.electron || !window.electron.pickVideoFile) {
+        alert('File picker unavailable — make sure you are running the latest installed build.');
+        return;
+      }
+      const filePath = await window.electron.pickVideoFile();
+      if (filePath) loadCutTabFile(filePath);
+    });
+  }
+
+  const startSlider = document.getElementById('cut-tab-start-slider');
+  const endSlider = document.getElementById('cut-tab-end-slider');
+  if (startSlider) startSlider.addEventListener('input', syncCutTabInputsFromSliders);
+  if (endSlider)   endSlider.addEventListener('input', syncCutTabInputsFromSliders);
+
+  const startInput = document.getElementById('cut-tab-start');
+  const endInput = document.getElementById('cut-tab-end');
+  if (startInput) startInput.addEventListener('blur', syncCutTabSlidersFromInputs);
+  if (endInput)   endInput.addEventListener('blur', syncCutTabSlidersFromInputs);
+
+  const cutBtn = document.getElementById('btn-start-cut-tab');
+  if (cutBtn) {
+    cutBtn.addEventListener('click', () => {
+      if (!cutTabState.filePath) { alert('Pick a file first.'); return; }
+      const startSec = parseTimeInput(document.getElementById('cut-tab-start').value);
+      const endSec = parseTimeInput(document.getElementById('cut-tab-end').value);
+      const keepOriginal = document.getElementById('cut-tab-keep-original').checked;
+      streamJob('cut-tab', '/api/cut-file', {
+        path: cutTabState.filePath,
+        startTime: startSec != null ? secondsToHms(startSec) : '',
+        endTime:   endSec   != null ? secondsToHms(endSec)   : '',
+        keepOriginal,
+      });
+    });
+  }
+
+  const cancelBtn = document.getElementById('btn-cancel-cut-tab');
+  if (cancelBtn) {
+    cancelBtn.addEventListener('click', async () => {
+      await fetch('/api/cancel', { method: 'POST' });
+    });
+  }
+});
 
 
